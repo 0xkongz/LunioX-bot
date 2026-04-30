@@ -156,6 +156,42 @@ export function createApiRouter(engine: TradingEngine, apiKey: string): Router {
     }
   });
 
+  // ─── POST /api/tokens/:key/reset-tracker ───────────────────────────
+  // Wipe today's tracker stats (volume, net position, buy/sell counts,
+  // and the per-day trade log) for a single token. Yesterday's record
+  // and other tokens are untouched. Persisted to disk immediately.
+  router.post(
+    "/tokens/:key/reset-tracker",
+    (req: Request, res: Response) => {
+      try {
+        const { key } = req.params;
+        const ok = engine.resetTokenStats(key);
+        if (!ok) {
+          res
+            .status(404)
+            .json({ error: `Token "${key}" not found or no stats to reset` });
+          return;
+        }
+        res.json({ success: true, key: key.toUpperCase() });
+      } catch (e: any) {
+        res.status(500).json({ error: e.message });
+      }
+    }
+  );
+
+  // ─── POST /api/wallets/refresh ────────────────────────────────────
+  // Force-refresh BNB balances on demand (in addition to the scheduled
+  // refresh). The next /api/status response after this call will show
+  // the new balances. No body required.
+  router.post("/wallets/refresh", async (_req: Request, res: Response) => {
+    try {
+      await engine.refreshBalances();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ─── POST /api/wallet ─────────────────────────────────────────────
   router.post("/wallet", (req: Request, res: Response) => {
     if (process.env.ALLOW_RUNTIME_WALLET_ADDITION !== "true") {

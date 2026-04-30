@@ -102,15 +102,37 @@ export class TradingEngine {
       this.bootstrapTokenState(token);
     }
 
-    // Refresh BNB balances regularly (independent of trading).
+    // Refresh BNB balances regularly (independent of trading). Interval
+    // is configurable via BALANCE_REFRESH_INTERVAL_SECONDS — default 2
+    // minutes is a good balance between RPC load and dashboard freshness.
     this.walletManager.refreshBalances().catch((err) => {
       logger.error(`Initial balance refresh failed: ${err.message ?? err}`);
     });
+    const refreshMs = Math.max(15, config.balanceRefreshIntervalSec) * 1000;
     this.balanceRefreshTimer = setInterval(() => {
       this.walletManager.refreshBalances().catch((err) => {
         logger.error(`Balance refresh failed: ${err.message ?? err}`);
       });
-    }, 10 * 60 * 1000);
+    }, refreshMs);
+  }
+
+  /**
+   * Force a balance refresh outside the scheduled interval. Used by the
+   * dashboard's manual refresh button.
+   */
+  async refreshBalances(): Promise<void> {
+    await this.walletManager.refreshBalances();
+  }
+
+  /**
+   * Reset today's tracker stats for one token. Used by the dashboard's
+   * reset button. Does not stop the engine or change config — the next
+   * trade just starts counting from zero.
+   */
+  resetTokenStats(tokenKey: string): boolean {
+    const token = this.registry.get(tokenKey);
+    if (!token) return false;
+    return this.tracker.resetToday(token.name);
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────

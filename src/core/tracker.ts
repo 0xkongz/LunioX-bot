@@ -211,6 +211,40 @@ export class DailyTracker {
     return summaries;
   }
 
+  /**
+   * Reset today's record for a single token. Wipes daily totals, counts,
+   * net position, and the per-day trades array — the on-chain history is
+   * untouched, only the bot's internal accounting restarts.
+   *
+   * Yesterday's record (if any) and other tokens' records are preserved.
+   * The change is persisted to disk immediately so it survives restarts.
+   *
+   * Returns true if a record existed and was cleared, false if there was
+   * nothing to reset.
+   */
+  resetToday(tokenName: string): boolean {
+    const today = this.todayKey();
+    const tokenRecords = this.records.get(tokenName);
+    if (!tokenRecords) return false;
+    const existed = tokenRecords.has(today);
+    if (!existed) return false;
+    tokenRecords.set(today, {
+      date: today,
+      tokenName,
+      totalBuyUsd: 0,
+      totalSellUsd: 0,
+      buyCount: 0,
+      sellCount: 0,
+      netUsd: 0,
+      trades: [],
+    });
+    // Persist immediately, not via the debounced save — operator hit the
+    // button expecting it to stick.
+    this.flush();
+    logger.info(`[Tracker] Reset today's record for ${tokenName}`);
+    return true;
+  }
+
   getRecentTrades(limit: number = 50): TradeRecord[] {
     const allTrades: (TradeRecord & { tokenName: string })[] = [];
     for (const [tokenName, dateMap] of this.records) {

@@ -204,7 +204,10 @@
       <div class="card">
         <div class="card-header">
           <span class="card-title">Wallets</span>
-          <button class="btn btn-primary btn-sm" onclick="promptAddWallet()">+ Add</button>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-ghost btn-sm" id="refreshWalletsBtn" onclick="refreshWallets()" title="Force refresh BNB balances">↻ Refresh</button>
+            <button class="btn btn-primary btn-sm" onclick="promptAddWallet()">+ Add</button>
+          </div>
         </div>
         <div class="wallet-list" id="walletList">
           <div style="color:var(--muted);font-size:.85rem;">Loading...</div>
@@ -555,6 +558,9 @@
                   <input type="number" value="${token.params.maxPriceImpactBps}" onchange="updateParam('${token.tokenKey}','maxPriceImpactBps',this.value)" title="On-curve impact ceiling. 1000 bps = 10%. Trade is rejected if exceeded." />
                 </div>
               </div>
+              <div style="margin-top:14px;display:flex;justify-content:flex-end;">
+                <button class="btn btn-ghost btn-sm" onclick="resetStats('${token.tokenKey}')" title="Wipe today's volume / net position / counts. On-chain history is unaffected.">↺ Reset Today's Stats</button>
+              </div>
             ` : `
               <div style="margin-top:12px;color:var(--muted);font-size:.85rem;">
                 Token is disabled. Use the toolbar above to enable it.
@@ -665,6 +671,32 @@
     function promptAddWallet() {
       const pk = prompt('Enter wallet private key:');
       if (pk) api('/wallet', 'POST', { privateKey: pk }).then(fetchStatus).catch(e => alert(e.message));
+    }
+
+    async function resetStats(tokenKey) {
+      if (!confirm(`Reset today's stats for ${tokenKey}? This clears daily volume, net position, buy/sell counts, and today's trade log. On-chain history is unaffected.`)) return;
+      try {
+        await api(`/tokens/${encodeURIComponent(tokenKey)}/reset-tracker`, 'POST');
+        await fetchStatus();
+      } catch (e) {
+        alert(`Reset failed: ${e.message}`);
+      }
+    }
+
+    async function refreshWallets() {
+      const btn = document.getElementById('refreshWalletsBtn');
+      const orig = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await api('/wallets/refresh', 'POST');
+        await fetchStatus();
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
     }
 
     setInterval(fetchStatus, 10000);

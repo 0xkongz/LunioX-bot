@@ -100,6 +100,8 @@ export interface AppConfig {
   dashboardApiKey: string;
   maxGasPriceGwei: number;
   gasLimitOverride: number;
+  /** How often the bot refreshes BNB balances of all wallets (seconds). */
+  balanceRefreshIntervalSec: number;
   dryRun: boolean;
 }
 
@@ -200,6 +202,9 @@ export function loadConfig(): AppConfig {
     dashboardApiKey: optionalEnv("DASHBOARD_API_KEY", "changeme"),
     maxGasPriceGwei: parseFloat(optionalEnv("MAX_GAS_PRICE_GWEI", "5")),
     gasLimitOverride: parseInt(optionalEnv("GAS_LIMIT_OVERRIDE", "500000")),
+    balanceRefreshIntervalSec: parseInt(
+      optionalEnv("BALANCE_REFRESH_INTERVAL_SECONDS", "120")
+    ),
     dryRun: optionalEnv("DRY_RUN", "false") === "true",
   };
 }
