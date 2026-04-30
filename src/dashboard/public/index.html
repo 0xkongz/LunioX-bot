@@ -394,14 +394,32 @@
         const r = await api('/tokens/detect?address=' + encodeURIComponent(addr));
         pendingDetection = r;
         summary.style.display = 'block';
-        const reservesUsdt = (BigInt(r.reserves.usdt) / 10n ** 18n).toString();
+        // Pair-side reserves: USDT for direct route, WBNB for wbnb-hop.
+        // Both have 18 decimals on BSC, so the conversion is the same.
+        const pairLiquidityRaw = r.reserves && r.reserves.pair
+          ? r.reserves.pair
+          : '0';
+        const pairLiquidity = (BigInt(pairLiquidityRaw) / 10n ** 18n).toString();
+        const liquidityLabel = r.route === 'wbnb-hop' ? 'WBNB Liquidity' : 'USDT Liquidity';
+        const routeBadge = r.route === 'wbnb-hop'
+          ? '<span class="badge badge-yellow">WBNB HOP</span>'
+          : '<span class="badge badge-blue">DIRECT</span>';
+        const hopRow = r.route === 'wbnb-hop' && r.wbnbUsdtPair
+          ? `<div class="row"><span>WBNB/USDT Pair</span><strong>${shortAddr(r.wbnbUsdtPair)}</strong></div>`
+          : '';
+        const priceRow = r.estimatedPriceUsd
+          ? `<div class="row"><span>Est. Price (USD)</span><strong>~$${r.estimatedPriceUsd}</strong></div>`
+          : '';
         summary.innerHTML = `
           <div class="row"><span>Symbol / Key</span><strong>${r.symbol}</strong></div>
           <div class="row"><span>Name</span><strong>${r.name}</strong></div>
           <div class="row"><span>Decimals</span><strong>${r.decimals}</strong></div>
+          <div class="row"><span>Route</span>${routeBadge}</div>
           <div class="row"><span>Address</span><strong>${shortAddr(r.address)}</strong></div>
           <div class="row"><span>V2 Pair</span><strong>${shortAddr(r.pairAddress)}</strong></div>
-          <div class="row"><span>USDT Liquidity</span><strong>~${reservesUsdt}</strong></div>
+          ${hopRow}
+          <div class="row"><span>${liquidityLabel}</span><strong>~${pairLiquidity}</strong></div>
+          ${priceRow}
         `;
         document.getElementById('saveTokenBtn').disabled = false;
         if (!document.getElementById('addTokenName').value) {
