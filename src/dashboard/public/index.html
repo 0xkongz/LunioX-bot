@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LunioX Trading Bot</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e1e4ed;
+      --muted: #8b8fa3;
+      --green: #22c55e;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --yellow: #eab308;
+      --accent: #8b5cf6;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    h1 { font-size: 1.5rem; margin-bottom: 4px; }
+    h2 { font-size: 1.1rem; margin-bottom: 12px; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; margin-bottom: 20px; }
+    .grid { display: grid; gap: 16px; }
+    .grid-3 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+    .grid-2 { grid-template-columns: 1fr 1fr; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+    .card-title { font-size: 1rem; font-weight: 600; }
+    .badge { padding: 3px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+    .badge-green { background: rgba(34,197,94,.15); color: var(--green); }
+    .badge-red { background: rgba(239,68,68,.15); color: var(--red); }
+    .badge-yellow { background: rgba(234,179,8,.15); color: var(--yellow); }
+    .badge-blue { background: rgba(59,130,246,.15); color: var(--blue); }
+    .badge-muted { background: rgba(139,143,163,.15); color: var(--muted); }
+    .stat { margin-bottom: 12px; }
+    .stat-label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-value { font-size: 1.4rem; font-weight: 700; margin-top: 2px; }
+    .stat-row { display: flex; gap: 20px; }
+    .mode-selector { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+    .mode-btn { padding: 6px 14px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 0.8rem; transition: all .15s; }
+    .mode-btn:hover { border-color: var(--accent); }
+    .mode-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
+    .param-group { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+    .param-input { display: flex; flex-direction: column; gap: 4px; }
+    .param-input label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+    .param-input input { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
+    .param-input input:focus { outline: none; border-color: var(--accent); }
+    .btn { padding: 8px 18px; border-radius: 8px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: all .15s; }
+    .btn-primary { background: var(--accent); color: white; }
+    .btn-primary:hover { opacity: .85; }
+    .btn-green { background: var(--green); color: white; }
+    .btn-red { background: var(--red); color: white; }
+    .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    .btn-ghost:hover { border-color: var(--accent); }
+    .btn-sm { padding: 5px 12px; font-size: 0.75rem; }
+    .btn[disabled] { opacity: .5; cursor: not-allowed; }
+    select, input.input-text {
+      padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 0.9rem;
+    }
+    select:focus, input.input-text:focus { outline: none; border-color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th { text-align: left; padding: 8px; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--border); text-transform: uppercase; font-size: 0.7rem; letter-spacing: .05em; }
+    td { padding: 8px; border-bottom: 1px solid var(--border); }
+    tr:last-child td { border-bottom: none; }
+    .buy { color: var(--green); }
+    .sell { color: var(--red); }
+    .error { color: var(--red); font-size: 0.8rem; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+    .topbar-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .uptime { color: var(--muted); font-size: 0.8rem; }
+    .wallet-list { display: flex; flex-direction: column; gap: 8px; }
+    .wallet-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--bg); border-radius: 8px; font-size: 0.8rem; }
+    .wallet-addr { font-family: monospace; color: var(--muted); }
+    .net-zero { color: var(--green); }
+    .net-pos { color: var(--blue); }
+    .net-neg { color: var(--red); }
+    .progress-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+    .progress-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+    .toolbar {
+      display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      padding: 14px 18px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; margin-bottom: 16px;
+    }
+    .toolbar .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: .05em; }
+    .toolbar .spacer { flex: 1; }
+    .empty-state { text-align: center; padding: 30px; color: var(--muted); }
+    /* Modals */
+    .modal-bg {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,.7); display: none;
+      align-items: center; justify-content: center; z-index: 100;
+    }
+    .modal-bg.show { display: flex; }
+    .modal {
+      background: var(--surface); border-radius: 12px; padding: 28px;
+      width: 460px; max-width: 92vw; max-height: 90vh; overflow-y: auto;
+    }
+    .modal h2 { margin-bottom: 6px; }
+    .modal .modal-sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 18px; }
+    .modal .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .modal .field label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+    .modal .field input, .modal .field select {
+      padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font-size: 0.9rem;
+    }
+    .modal .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px; }
+    .detected-summary {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px; font-size: 0.85rem; margin: 8px 0 14px;
+    }
+    .detected-summary .row { display: flex; justify-content: space-between; padding: 4px 0; }
+    .detected-summary .row strong { color: var(--accent); font-family: monospace; }
+    #apiKeyModal input { width: 100%; padding: 10px; margin: 12px 0; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+  </style>
+</head>
+<body>
+  <!-- API key login -->
+  <div id="apiKeyModal" class="modal-bg show">
+    <div class="modal">
+      <h2>Dashboard Login</h2>
+      <p class="modal-sub">Enter your API key to access the dashboard.</p>
+      <input type="password" id="apiKeyInput" placeholder="API Key" />
+      <button class="btn btn-primary" style="width:100%" onclick="setApiKey()">Connect</button>
+    </div>
+  </div>
+
+  <!-- Add Token Modal -->
+  <div id="addTokenModal" class="modal-bg">
+    <div class="modal">
+      <h2>Add Token</h2>
+      <p class="modal-sub">Paste a BSC contract address. The bot will auto-detect name, symbol, decimals, and the V2/USDT pair.</p>
+
+      <div class="field">
+        <label>Contract Address</label>
+        <input id="addTokenAddress" placeholder="0x..." />
+      </div>
+
+      <div id="detectedSummary" class="detected-summary" style="display:none;"></div>
+      <div id="addTokenError" class="error" style="margin-bottom:10px;"></div>
+
+      <div class="field">
+        <label>Display Name (optional override)</label>
+        <input id="addTokenName" placeholder="e.g. LunioX" />
+      </div>
+
+      <div class="field">
+        <label>Wallet Selector (e.g. "1-3", "1,3,5", or empty for all)</label>
+        <input id="addTokenWallets" placeholder="" />
+      </div>
+
+      <div class="field">
+        <label>Enable Immediately?</label>
+        <select id="addTokenEnabled">
+          <option value="false">No — register but keep disabled</option>
+          <option value="true">Yes — enable on save</option>
+        </select>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeAddTokenModal()">Cancel</button>
+        <button class="btn btn-primary" id="detectBtn" onclick="detectToken()">Detect</button>
+        <button class="btn btn-green" id="saveTokenBtn" onclick="saveToken()" disabled>Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="topbar">
+      <div>
+        <h1>LunioX Trading Bot</h1>
+        <div class="subtitle">PancakeSwap V2 | BSC Mainnet</div>
+      </div>
+      <div class="topbar-right">
+        <span class="uptime" id="uptime">--</span>
+        <span id="engineBadge" class="badge badge-muted">OFFLINE</span>
+        <button class="btn btn-green btn-sm" id="startBtn" onclick="startEngine()">Start</button>
+        <button class="btn btn-red btn-sm" id="stopBtn" onclick="stopEngine()">Stop</button>
+      </div>
+    </div>
+
+    <!-- Token-management toolbar -->
+    <div class="toolbar">
+      <span class="label">Token</span>
+      <select id="tokenFilter" onchange="onTokenFilterChange()">
+        <option value="__ALL__">All registered</option>
+      </select>
+      <span class="label" id="tokenAddrLabel" style="font-family:monospace;color:var(--muted);"></span>
+      <span class="spacer"></span>
+      <button class="btn btn-primary btn-sm" onclick="openAddTokenModal()">+ Add Token</button>
+      <button class="btn btn-red btn-sm" id="removeTokenBtn" onclick="removeSelectedToken()" disabled>Remove</button>
+      <button class="btn btn-ghost btn-sm" id="toggleEnableBtn" onclick="toggleSelectedTokenEnabled()" disabled>Enable</button>
+    </div>
+
+    <!-- Token Cards -->
+    <div class="grid grid-3" id="tokenCards"></div>
+
+    <!-- Bottom Section -->
+    <div class="grid grid-2" style="margin-top:16px;">
+      <!-- Wallets -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Wallets</span>
+          <button class="btn btn-primary btn-sm" onclick="promptAddWallet()">+ Add</button>
+        </div>
+        <div class="wallet-list" id="walletList">
+          <div style="color:var(--muted);font-size:.85rem;">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Daily Summary -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Daily Summary</span>
+        </div>
+        <div id="dailySummary">
+          <div style="color:var(--muted);font-size:.85rem;">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Trades -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header">
+        <span class="card-title">Recent Trades</span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Token</th>
+              <th>Direction</th>
+              <th>Amount (USD)</th>
+              <th>Impact</th>
+              <th>Wallet</th>
+              <th>Tx</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="tradesTable">
+            <tr><td colspan="8" style="color:var(--muted);text-align:center;">No trades yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let API_KEY = localStorage.getItem('botApiKey') || '';
+    const MODES = ['delta_neutral', 'dca_buy', 'dca_sell', 'stopped'];
+    const MODE_LABELS = { delta_neutral: 'Delta Neutral', dca_buy: 'DCA Buy', dca_sell: 'DCA Sell', stopped: 'Stopped' };
+    const MODE_COLORS = { delta_neutral: 'badge-blue', dca_buy: 'badge-green', dca_sell: 'badge-yellow', stopped: 'badge-muted' };
+
+    /** Currently selected token key in the dropdown ("__ALL__" or a token key). */
+    let selectedToken = localStorage.getItem('selectedToken') || '__ALL__';
+    /** Latest /api/status payload — kept around so UI can re-render after a token CRUD without an extra fetch. */
+    let lastStatus = null;
+    /** Last detection result while the Add Token modal is open. */
+    let pendingDetection = null;
+
+    if (API_KEY) document.getElementById('apiKeyModal').classList.remove('show');
+
+    function setApiKey() {
+      API_KEY = document.getElementById('apiKeyInput').value;
+      localStorage.setItem('botApiKey', API_KEY);
+      document.getElementById('apiKeyModal').classList.remove('show');
+      fetchStatus();
+    }
+
+    async function api(path, method = 'GET', body = null) {
+      const opts = { method, headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY } };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch('/api' + path, opts);
+      let data = null;
+      try { data = await res.json(); } catch { data = null; }
+      if (!res.ok) {
+        const err = new Error((data && data.error) || `HTTP ${res.status}`);
+        err.status = res.status;
+        throw err;
+      }
+      return data;
+    }
+
+    function shortAddr(addr) {
+      return addr ? addr.slice(0, 6) + '...' + addr.slice(-4) : '';
+    }
+    function fmtTime(ts) { return new Date(ts).toLocaleTimeString(); }
+    function fmtUptime(ms) {
+      const s = Math.floor(ms / 1000);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      return `${h}h ${m}m uptime`;
+    }
+
+    // ─── Token toolbar / dropdown ──────────────────────────────────────
+    function renderTokenFilter(tokens) {
+      const select = document.getElementById('tokenFilter');
+      const prev = selectedToken;
+      const options = ['<option value="__ALL__">All registered</option>'];
+      for (const t of tokens) {
+        const suffix = t.enabled ? '' : ' (disabled)';
+        options.push(`<option value="${t.tokenKey}">${t.tokenName} — ${t.tokenKey}${suffix}</option>`);
+      }
+      select.innerHTML = options.join('');
+      // Restore selection if still valid; otherwise fall back to "all".
+      const validKeys = new Set(['__ALL__', ...tokens.map(t => t.tokenKey)]);
+      selectedToken = validKeys.has(prev) ? prev : '__ALL__';
+      select.value = selectedToken;
+      updateToolbarForSelection();
+    }
+
+    function updateToolbarForSelection() {
+      const removeBtn = document.getElementById('removeTokenBtn');
+      const toggleBtn = document.getElementById('toggleEnableBtn');
+      const addrLabel = document.getElementById('tokenAddrLabel');
+      if (selectedToken === '__ALL__') {
+        removeBtn.disabled = true;
+        toggleBtn.disabled = true;
+        toggleBtn.textContent = 'Enable';
+        addrLabel.textContent = '';
+        return;
+      }
+      const t = (lastStatus?.tokens || []).find(x => x.tokenKey === selectedToken);
+      removeBtn.disabled = !t;
+      toggleBtn.disabled = !t;
+      if (t) {
+        toggleBtn.textContent = t.enabled ? 'Disable' : 'Enable';
+        addrLabel.textContent = shortAddr(t.tokenAddress);
+      }
+    }
+
+    function onTokenFilterChange() {
+      selectedToken = document.getElementById('tokenFilter').value;
+      localStorage.setItem('selectedToken', selectedToken);
+      updateToolbarForSelection();
+      if (lastStatus) renderTokenCards(lastStatus);
+    }
+
+    async function removeSelectedToken() {
+      if (selectedToken === '__ALL__') return;
+      if (!confirm(`Remove ${selectedToken} from the registry? This stops trading and drops its strategy.`)) return;
+      try {
+        await api(`/tokens/${encodeURIComponent(selectedToken)}`, 'DELETE');
+        selectedToken = '__ALL__';
+        localStorage.setItem('selectedToken', selectedToken);
+        await fetchStatus();
+      } catch (e) {
+        alert(`Remove failed: ${e.message}`);
+      }
+    }
+
+    async function toggleSelectedTokenEnabled() {
+      if (selectedToken === '__ALL__') return;
+      const t = (lastStatus?.tokens || []).find(x => x.tokenKey === selectedToken);
+      if (!t) return;
+      try {
+        await api(`/tokens/${encodeURIComponent(selectedToken)}`, 'PATCH', { enabled: !t.enabled });
+        await fetchStatus();
+      } catch (e) {
+        alert(`Toggle failed: ${e.message}`);
+      }
+    }
+
+    // ─── Add-token modal ───────────────────────────────────────────────
+    function openAddTokenModal() {
+      pendingDetection = null;
+      document.getElementById('addTokenAddress').value = '';
+      document.getElementById('addTokenName').value = '';
+      document.getElementById('addTokenWallets').value = '';
+      document.getElementById('addTokenEnabled').value = 'false';
+      document.getElementById('addTokenError').textContent = '';
+      document.getElementById('detectedSummary').style.display = 'none';
+      document.getElementById('saveTokenBtn').disabled = true;
+      document.getElementById('addTokenModal').classList.add('show');
+    }
+    function closeAddTokenModal() {
+      document.getElementById('addTokenModal').classList.remove('show');
+    }
+
+    async function detectToken() {
+      const addr = document.getElementById('addTokenAddress').value.trim();
+      const errEl = document.getElementById('addTokenError');
+      const summary = document.getElementById('detectedSummary');
+      errEl.textContent = '';
+      summary.style.display = 'none';
+      pendingDetection = null;
+      document.getElementById('saveTokenBtn').disabled = true;
+      if (!addr) { errEl.textContent = 'Enter a contract address first.'; return; }
+      try {
+        const r = await api('/tokens/detect?address=' + encodeURIComponent(addr));
+        pendingDetection = r;
+        summary.style.display = 'block';
+        const reservesUsdt = (BigInt(r.reserves.usdt) / 10n ** 18n).toString();
+        summary.innerHTML = `
+          <div class="row"><span>Symbol / Key</span><strong>${r.symbol}</strong></div>
+          <div class="row"><span>Name</span><strong>${r.name}</strong></div>
+          <div class="row"><span>Decimals</span><strong>${r.decimals}</strong></div>
+          <div class="row"><span>Address</span><strong>${shortAddr(r.address)}</strong></div>
+          <div class="row"><span>V2 Pair</span><strong>${shortAddr(r.pairAddress)}</strong></div>
+          <div class="row"><span>USDT Liquidity</span><strong>~${reservesUsdt}</strong></div>
+        `;
+        document.getElementById('saveTokenBtn').disabled = false;
+        if (!document.getElementById('addTokenName').value) {
+          document.getElementById('addTokenName').value = r.name || r.symbol;
+        }
+      } catch (e) {
+        errEl.textContent = e.message;
+      }
+    }
+
+    async function saveToken() {
+      if (!pendingDetection) return;
+      const errEl = document.getElementById('addTokenError');
+      errEl.textContent = '';
+      const body = {
+        address: pendingDetection.address,
+        name: document.getElementById('addTokenName').value.trim() || undefined,
+        walletSelector: document.getElementById('addTokenWallets').value.trim(),
+        enabled: document.getElementById('addTokenEnabled').value === 'true',
+      };
+      try {
+        const r = await api('/tokens', 'POST', body);
+        selectedToken = r.token.key;
+        localStorage.setItem('selectedToken', selectedToken);
+        closeAddTokenModal();
+        await fetchStatus();
+      } catch (e) {
+        errEl.textContent = e.message;
+      }
+    }
+
+    // ─── Render ────────────────────────────────────────────────────────
+    function tokenMatchesFilter(token) {
+      return selectedToken === '__ALL__' || token.tokenKey === selectedToken;
+    }
+
+    function renderTokenCards(data) {
+      const container = document.getElementById('tokenCards');
+      container.innerHTML = '';
+
+      const visible = data.tokens.filter(tokenMatchesFilter);
+
+      if (data.tokens.length === 0) {
+        container.innerHTML = `
+          <div class="card empty-state" style="grid-column:1/-1;">
+            No tokens registered yet. Click <strong>+ Add Token</strong> above to get started.
+          </div>`;
+        return;
+      }
+
+      if (visible.length === 0) {
+        container.innerHTML = `
+          <div class="card empty-state" style="grid-column:1/-1;">
+            No tokens match the current filter.
+          </div>`;
+        return;
+      }
+
+      for (const token of visible) {
+        const price = data.prices.find(p => p.tokenName === token.tokenName);
+        const summary = data.dailySummary.find(s => s.tokenName === token.tokenName);
+        const volumePct = summary ? Math.min(100, (summary.totalVolume / token.params.dailyVolumeTargetUsd) * 100) : 0;
+        const netClass = !summary ? '' : summary.netUsd > 1 ? 'net-pos' : summary.netUsd < -1 ? 'net-neg' : 'net-zero';
+        const enabledBadge = token.enabled ? '' : '<span class="badge badge-muted" style="margin-left:6px;">DISABLED</span>';
+        const healthBadge = token.enabled && !token.available && token.healthError
+          ? `<span class="badge badge-red" style="margin-left:6px;" title="${token.healthError}">UNAVAILABLE</span>`
+          : '';
+        const routeBadge = token.route === 'wbnb-hop'
+          ? '<span class="badge badge-yellow" style="margin-left:6px;" title="Trades route via WBNB (extra hop)">WBNB HOP</span>'
+          : '<span class="badge badge-blue" style="margin-left:6px;" title="Direct token/USDT pair">DIRECT</span>';
+
+        container.innerHTML += `
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">${token.tokenName} ${enabledBadge}${routeBadge}${healthBadge}</span>
+              <span class="badge ${MODE_COLORS[token.mode]}">${MODE_LABELS[token.mode]}</span>
+            </div>
+            <div style="font-size:.7rem;color:var(--muted);margin-bottom:10px;font-family:monospace;">
+              ${shortAddr(token.tokenAddress)} · pair ${shortAddr(token.pairAddress)}
+            </div>
+            <div class="stat-row">
+              <div class="stat">
+                <div class="stat-label">Price</div>
+                <div class="stat-value">$${price ? price.priceUsd.toFixed(6) : '--'}</div>
+              </div>
+              <div class="stat">
+                <div class="stat-label">Net Position</div>
+                <div class="stat-value ${netClass}">$${summary ? summary.netUsd.toFixed(2) : '0.00'}</div>
+              </div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Daily Volume: $${summary ? summary.totalVolume.toFixed(0) : '0'} / $${token.params.dailyVolumeTargetUsd}</div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width:${volumePct}%;background:${volumePct >= 100 ? 'var(--green)' : 'var(--accent)'}"></div>
+              </div>
+            </div>
+            <div class="stat-row" style="margin-top:8px;">
+              <div class="stat"><div class="stat-label">Buys</div><div class="stat-value buy">${summary ? summary.totalBuyUsd.toFixed(0) : '0'}</div></div>
+              <div class="stat"><div class="stat-label">Sells</div><div class="stat-value sell">${summary ? summary.totalSellUsd.toFixed(0) : '0'}</div></div>
+              <div class="stat"><div class="stat-label">Trades</div><div class="stat-value">${summary ? summary.tradeCount : '0'}</div></div>
+            </div>
+            <div style="margin-top:8px;font-size:.75rem;color:var(--muted);">
+              Wallets: ${token.walletIndices && token.walletIndices.length ? token.walletIndices.map(i => '#' + (i+1)).join(', ') : 'none'}
+            </div>
+            ${token.error ? `<div class="error" style="margin-top:8px;">Error: ${token.error}</div>` : ''}
+            ${token.enabled ? `
+              <div class="mode-selector">
+                ${MODES.map(m => `<button class="mode-btn ${token.mode === m ? 'active' : ''}" onclick="setMode('${token.tokenKey}','${m}')">${MODE_LABELS[m]}</button>`).join('')}
+              </div>
+              <div class="param-group">
+                <div class="param-input">
+                  <label>Trade Size ($)</label>
+                  <input type="number" value="${token.params.tradeAmountUsd}" onchange="updateParam('${token.tokenKey}','tradeAmountUsd',this.value)" />
+                </div>
+                <div class="param-input">
+                  <label>Interval (sec)</label>
+                  <input type="number" value="${token.params.intervalSeconds}" onchange="updateParam('${token.tokenKey}','intervalSeconds',this.value)" />
+                </div>
+                <div class="param-input">
+                  <label>Daily Target ($)</label>
+                  <input type="number" value="${token.params.dailyVolumeTargetUsd}" onchange="updateParam('${token.tokenKey}','dailyVolumeTargetUsd',this.value)" />
+                </div>
+                <div class="param-input">
+                  <label>DCA Bias (%)</label>
+                  <input type="number" value="${token.params.dcaBiasPercent}" onchange="updateParam('${token.tokenKey}','dcaBiasPercent',this.value)" />
+                </div>
+                <div class="param-input">
+                  <label>Max Slippage (bps)</label>
+                  <input type="number" value="${token.params.maxSlippageBps}" onchange="updateParam('${token.tokenKey}','maxSlippageBps',this.value)" title="100 bps = 1%" />
+                </div>
+                <div class="param-input">
+                  <label>Max Price Impact (bps)</label>
+                  <input type="number" value="${token.params.maxPriceImpactBps}" onchange="updateParam('${token.tokenKey}','maxPriceImpactBps',this.value)" title="On-curve impact ceiling. 1000 bps = 10%. Trade is rejected if exceeded." />
+                </div>
+              </div>
+            ` : `
+              <div style="margin-top:12px;color:var(--muted);font-size:.85rem;">
+                Token is disabled. Use the toolbar above to enable it.
+              </div>
+            `}
+          </div>`;
+      }
+    }
+
+    function renderWallets(wallets) {
+      const el = document.getElementById('walletList');
+      if (!wallets.length) { el.innerHTML = '<div style="color:var(--muted)">No wallets loaded</div>'; return; }
+      el.innerHTML = wallets.map(w => `
+        <div class="wallet-item">
+          <span>${w.label}</span>
+          <span class="wallet-addr">${shortAddr(w.address)}</span>
+          <span>${parseFloat(w.bnbBalance).toFixed(4)} BNB</span>
+          <span style="font-size:.7rem;color:var(--accent);">${w.tokens ? w.tokens.join(', ') : ''}</span>
+        </div>`).join('');
+    }
+
+    function impactColor(bps) {
+      if (bps == null) return 'var(--muted)';
+      if (bps >= 500) return 'var(--red)';
+      if (bps >= 200) return 'var(--yellow)';
+      return 'var(--green)';
+    }
+
+    function renderTrades(trades) {
+      const el = document.getElementById('tradesTable');
+      if (!trades.length) { el.innerHTML = '<tr><td colspan="8" style="color:var(--muted);text-align:center;">No trades yet</td></tr>'; return; }
+      el.innerHTML = trades.map(t => {
+        const impact = (t.priceImpactBps || 0);
+        const impactStr = impact === 0 ? '—' : (impact / 100).toFixed(2) + '%';
+        return `
+        <tr>
+          <td>${fmtTime(t.timestamp)}</td>
+          <td>${t.tokenName || '--'}</td>
+          <td class="${t.direction}">${t.direction.toUpperCase()}</td>
+          <td>$${t.estimatedUsd.toFixed(2)}</td>
+          <td style="color:${impactColor(impact)}">${impactStr}</td>
+          <td class="wallet-addr">${shortAddr(t.walletAddress)}</td>
+          <td>${t.txHash ? `<a href="https://bscscan.com/tx/${t.txHash}" target="_blank" style="color:var(--accent)">${shortAddr(t.txHash)}</a>` : '--'}</td>
+          <td>${t.success ? '<span class="buy">OK</span>' : '<span class="sell">FAIL</span>'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderDailySummary(summaries) {
+      const el = document.getElementById('dailySummary');
+      if (!summaries.length) { el.innerHTML = '<div style="color:var(--muted)">No activity today</div>'; return; }
+      el.innerHTML = summaries.map(s => {
+        const netClass = s.netUsd > 1 ? 'net-pos' : s.netUsd < -1 ? 'net-neg' : 'net-zero';
+        return `
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);">
+            <strong>${s.tokenName}</strong>
+            <span class="buy">+$${s.totalBuyUsd.toFixed(0)}</span>
+            <span class="sell">-$${s.totalSellUsd.toFixed(0)}</span>
+            <span class="${netClass}">Net: $${s.netUsd.toFixed(2)}</span>
+            <span style="color:var(--muted)">${s.tradeCount} trades</span>
+          </div>`;
+      }).join('');
+    }
+
+    async function fetchStatus() {
+      try {
+        const data = await api('/status');
+        lastStatus = data;
+        document.getElementById('engineBadge').className = `badge ${data.running ? 'badge-green' : 'badge-muted'}`;
+        document.getElementById('engineBadge').textContent = data.running ? 'RUNNING' : 'STOPPED';
+        document.getElementById('uptime').textContent = data.running ? fmtUptime(data.uptime) : '';
+        renderTokenFilter(data.tokens);
+        renderTokenCards(data);
+        renderWallets(data.wallets);
+        renderTrades(data.recentTrades);
+        renderDailySummary(data.dailySummary);
+      } catch (e) {
+        console.error('Failed to fetch status:', e);
+        if (e.status === 401) {
+          // API key was rejected — re-prompt.
+          API_KEY = '';
+          localStorage.removeItem('botApiKey');
+          document.getElementById('apiKeyModal').classList.add('show');
+        }
+      }
+    }
+
+    async function setMode(token, mode) {
+      try { await api('/mode', 'POST', { token, mode }); } catch (e) { alert(e.message); }
+      fetchStatus();
+    }
+
+    async function updateParam(token, key, value) {
+      const params = {};
+      params[key] = parseFloat(value);
+      try { await api('/params', 'POST', { token, params }); } catch (e) { alert(e.message); }
+    }
+
+    async function startEngine() {
+      try { await api('/start', 'POST'); } catch (e) { alert(e.message); }
+      fetchStatus();
+    }
+    async function stopEngine() {
+      try { await api('/stop', 'POST'); } catch (e) { alert(e.message); }
+      fetchStatus();
+    }
+
+    function promptAddWallet() {
+      const pk = prompt('Enter wallet private key:');
+      if (pk) api('/wallet', 'POST', { privateKey: pk }).then(fetchStatus).catch(e => alert(e.message));
+    }
+
+    setInterval(fetchStatus, 10000);
+    if (API_KEY) fetchStatus();
+  </script>
+</body>
+</html>

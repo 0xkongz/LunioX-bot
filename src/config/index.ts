@@ -1,0 +1,238 @@
+import dotenv from "dotenv";
+import path from "path";
+dotenv.config();
+
+// ─── Token Definitions ───────────────────────────────────────────────
+//
+// Unlike the original Token X bot, tokens here are NOT hardcoded. They live
+// in a JSON registry on disk (see services/token-registry.ts) which the
+// dashboard adds and removes from at runtime. This struct is the
+// validated, in-memory shape that the engine and strategies consume.
+
+/**
+ * How this token reaches USDT.
+ *   - "direct"   → swap path is [token, USDT]; pairAddress = token/USDT pair.
+ *   - "wbnb-hop" → swap path is [token, WBNB, USDT]; pairAddress = token/WBNB
+ *                  pair, wbnbUsdtPair = the canonical WBNB/USDT pair.
+ *
+ * Tokens with no liquid V2 pair on either path are rejected at registration.
+ */
+export type TokenRoute = "direct" | "wbnb-hop";
+
+export interface TokenConfig {
+  /** Stable map key — derived from the contract symbol; uppercased. */
+  key: string;
+  /** Human-readable display name. */
+  name: string;
+  /** Token contract address (BSC). */
+  address: string;
+  /** Decimals as reported by the ERC20 contract. */
+  decimals: number;
+  /** USDT pair token (kept here for symmetry with the original bot). */
+  pairToken: string;
+  /** USDT decimals on BSC = 18. */
+  pairDecimals: number;
+  /**
+   * Primary V2 pair the bot quotes against:
+   *   - direct   route: token/USDT pair address
+   *   - wbnb-hop route: token/WBNB pair address
+   * Health checks read its reserves to decide whether the token is tradable.
+   */
+  pairAddress: string;
+  /** How this token reaches USDT. Defaults to "direct" for back-compat. */
+  route: TokenRoute;
+  /**
+   * Second-hop pair for wbnb-hop tokens (the WBNB/USDT pair). Required when
+   * route === "wbnb-hop"; ignored otherwise.
+   */
+  wbnbUsdtPair?: string;
+  /** Whether the engine should trade this token. */
+  enabled: boolean;
+  /** Global wallet indices assigned to this token (0-based). */
+  walletIndices: number[];
+}
+
+// ─── Trading Mode ────────────────────────────────────────────────────
+export type TradingMode = "delta_neutral" | "dca_buy" | "dca_sell" | "stopped";
+
+// ─── Per-Token Trading Parameters ────────────────────────────────────
+export interface TradingParams {
+  mode: TradingMode;
+  tradeAmountUsd: number;
+  intervalSeconds: number;
+  variancePercent: number;
+  dailyVolumeTargetUsd: number;
+  /** Slippage tolerance applied to amountOutMin (bps; 100 = 1%). */
+  maxSlippageBps: number;
+  /**
+   * Constant-product price-impact ceiling (bps; 1000 = 10%). The swap is
+   * aborted before submission if the on-curve impact exceeds this threshold.
+   * Set higher for thin pools, lower for deep ones.
+   */
+  maxPriceImpactBps: number;
+  dcaBiasPercent: number;
+}
+
+// ─── Main Config ─────────────────────────────────────────────────────
+export interface AppConfig {
+  rpcUrl: string;
+  chainId: number;
+  walletKeys: string[];
+
+  // PancakeSwap V2 contracts (BSC mainnet defaults).
+  v2RouterAddress: string;
+  v2FactoryAddress: string;
+
+  // Stable pair token (USDT on BSC).
+  usdtAddress: string;
+  // WBNB on BSC — used as the intermediate hop for tokens without a direct
+  // USDT pair.
+  wbnbAddress: string;
+
+  // Registry persistence.
+  tokensFile: string;
+  trackerDataDir: string;
+
+  // Defaults applied to newly-registered tokens.
+  defaultTradingParams: TradingParams;
+  defaultWalletSelector: string; // raw "1-3" / "1,2,5" / "" form
+
+  dashboardPort: number;
+  dashboardApiKey: string;
+  maxGasPriceGwei: number;
+  gasLimitOverride: number;
+  dryRun: boolean;
+}
+
+function requiredEnv(key: string): string {
+  const val = process.env[key];
+  if (!val) throw new Error(`Missing required env var: ${key}`);
+  return val;
+}
+
+function optionalEnv(key: string, fallback: string): string {
+  return process.env[key] || fallback;
+}
+
+function isValidAddress(v: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(v);
+}
+
+// BSC Mainnet stablecoin
+const BSC_USDT = "0x55d398326f99059fF775485246999027B3197955";
+// Canonical WBNB on BSC mainnet — used as the intermediate hop when a token
+// has no direct USDT pair. Same address PancakeSwap V2 SDK uses.
+const BSC_WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
+
+// PancakeSwap V2 canonical contracts (BSC mainnet)
+const PANCAKE_V2_ROUTER_DEFAULT = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
+const PANCAKE_V2_FACTORY_DEFAULT = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73";
+
+export function loadConfig(): AppConfig {
+  const walletKeysRaw = requiredEnv("WALLET_PRIVATE_KEYS");
+  const walletKeys = walletKeysRaw
+    .split(",")
+    .map((k) => k.trim())
+    .filter(Boolean);
+
+  if (walletKeys.length === 0) {
+    throw new Error("At least one wallet private key is required");
+  }
+
+  const v2RouterAddress = optionalEnv(
+    "PANCAKE_V2_ROUTER",
+    PANCAKE_V2_ROUTER_DEFAULT
+  );
+  const v2FactoryAddress = optionalEnv(
+    "PANCAKE_V2_FACTORY",
+    PANCAKE_V2_FACTORY_DEFAULT
+  );
+  if (!isValidAddress(v2RouterAddress)) {
+    throw new Error(`PANCAKE_V2_ROUTER malformed: ${v2RouterAddress}`);
+  }
+  if (!isValidAddress(v2FactoryAddress)) {
+    throw new Error(`PANCAKE_V2_FACTORY malformed: ${v2FactoryAddress}`);
+  }
+
+  const tokensFile =
+    optionalEnv("TOKENS_FILE", path.join(process.cwd(), "data", "tokens.json"));
+
+  const trackerDataDir =
+    optionalEnv("TRACKER_DATA_DIR", path.join(process.cwd(), "data", "tracker"));
+
+  return {
+    rpcUrl: optionalEnv("BSC_RPC_URL", "https://bsc-dataseed1.binance.org"),
+    chainId: parseInt(optionalEnv("CHAIN_ID", "56")),
+    walletKeys,
+    v2RouterAddress,
+    v2FactoryAddress,
+    usdtAddress: BSC_USDT,
+    wbnbAddress: BSC_WBNB,
+    tokensFile,
+    trackerDataDir,
+    defaultTradingParams: {
+      mode: (() => {
+        const m = optionalEnv("DEFAULT_MODE", "stopped");
+        const valid: TradingMode[] = [
+          "delta_neutral",
+          "dca_buy",
+          "dca_sell",
+          "stopped",
+        ];
+        if (!valid.includes(m as TradingMode)) {
+          throw new Error(
+            `Invalid DEFAULT_MODE '${m}'. Must be one of: ${valid.join(", ")}`
+          );
+        }
+        return m as TradingMode;
+      })(),
+      tradeAmountUsd: parseFloat(optionalEnv("TRADE_AMOUNT_USD", "50")),
+      intervalSeconds: parseInt(optionalEnv("TRADE_INTERVAL_SECONDS", "300")),
+      variancePercent: parseFloat(optionalEnv("VARIANCE_PERCENT", "20")),
+      dailyVolumeTargetUsd: parseFloat(
+        optionalEnv("DAILY_VOLUME_TARGET_USD", "10000")
+      ),
+      maxSlippageBps: parseInt(optionalEnv("MAX_SLIPPAGE_BPS", "100")),
+      maxPriceImpactBps: parseInt(optionalEnv("MAX_PRICE_IMPACT_BPS", "1000")),
+      dcaBiasPercent: parseFloat(optionalEnv("DCA_BIAS_PERCENT", "70")),
+    },
+    defaultWalletSelector: optionalEnv("DEFAULT_TOKEN_WALLETS", ""),
+    dashboardPort: parseInt(optionalEnv("PORT", "3000")),
+    dashboardApiKey: optionalEnv("DASHBOARD_API_KEY", "changeme"),
+    maxGasPriceGwei: parseFloat(optionalEnv("MAX_GAS_PRICE_GWEI", "5")),
+    gasLimitOverride: parseInt(optionalEnv("GAS_LIMIT_OVERRIDE", "500000")),
+    dryRun: optionalEnv("DRY_RUN", "false") === "true",
+  };
+}
+
+/**
+ * Parse a wallet selector string into 0-based indices.
+ *
+ * Forms:
+ *   - "1-3"   → [0, 1, 2]
+ *   - "1,3,5" → [0, 2, 4]
+ *   - ""      → all wallets
+ */
+export function parseWalletSelector(
+  raw: string,
+  totalWallets: number
+): number[] {
+  const v = raw.trim();
+  if (!v) return Array.from({ length: totalWallets }, (_, i) => i);
+
+  if (v.includes("-") && !v.includes(",")) {
+    const [startStr, endStr] = v.split("-");
+    const start = parseInt(startStr) - 1;
+    const end = parseInt(endStr) - 1;
+    const indices: number[] = [];
+    for (let i = start; i <= end && i < totalWallets; i++) {
+      if (i >= 0) indices.push(i);
+    }
+    return indices;
+  }
+
+  return v
+    .split(",")
+    .map((s) => parseInt(s.trim()) - 1)
+    .filter((i) => i >= 0 && i < totalWallets);
+}
