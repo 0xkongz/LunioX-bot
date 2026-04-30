@@ -1,6 +1,5 @@
-import dotenv from "dotenv";
+import "dotenv/config";
 import path from "path";
-dotenv.config();
 
 // ─── Token Definitions ───────────────────────────────────────────────
 //
