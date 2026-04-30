@@ -371,7 +371,6 @@ export class TradingEngine {
 
       try {
         const walletGroup = this.walletManager.getTokenGroup(key);
-        const wallet = walletGroup.nextRoundRobin();
         const token = this.registry.get(key);
         if (!token) continue;
 
@@ -380,8 +379,39 @@ export class TradingEngine {
             ? this.swapService.amountFromUsd(rebalance.amountUsd, token.pairDecimals)
             : await this.priceFeed.usdToTokenAmount(rebalance.amountUsd, token);
 
+        // Same balance-aware fallback as BaseStrategy.execute() — skip
+        // the rebalance instead of failing on-chain.
+        const inputToken =
+          rebalance.direction === "buy" ? token.pairToken : token.address;
+        const preferred = walletGroup.nextRoundRobin();
+        const candidates = [
+          preferred,
+          ...walletGroup.getAll().filter((w) => w.index !== preferred.index),
+        ];
+        let chosen: typeof preferred | null = null;
+        for (const w of candidates) {
+          try {
+            const balance = await this.swapService.getTokenBalance(
+              w.address,
+              inputToken
+            );
+            if (balance >= amountIn) {
+              chosen = w;
+              break;
+            }
+          } catch {
+            // RPC blip — try next wallet.
+          }
+        }
+        if (!chosen) {
+          logger.warn(
+            `[Rebalance] ${state.tokenName} skipped — no wallet has enough ${rebalance.direction === "buy" ? "USDT" : token.name}`
+          );
+          continue;
+        }
+
         const result = await this.swapService.executeSwap(
-          wallet.wallet,
+          chosen.wallet,
           token,
           amountIn,
           rebalance.direction,
