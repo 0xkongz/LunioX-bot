@@ -104,7 +104,7 @@ Quiet periods don't persist across restarts — that's an intentional simplifica
 
 ## Daily and weekly lifecycle
 
-The lifecycle runs on a **once-per-minute tick** from the engine, not on a precise scheduler. This matches the existing trade interval mechanism and makes the design tolerant to tick latency.
+The lifecycle runs on a **once-per-minute tick** owned by `WeeklyAnchor` itself (separate from the existing trade-interval and balance-refresh timers). A `setInterval(() => weeklyAnchor.tick(), 60_000)` is started by the engine constructor for each enabled `delta_neutral` token. The tick handler is idempotent — calling it twice in the same minute is a no-op because the persisted `today.openedAt` and `anchor.setAt` guard against double rolls. This makes the design tolerant to clock skew, tick latency, and duplicate calls.
 
 ### Weekly anchor reset — Monday 00:00 UTC
 

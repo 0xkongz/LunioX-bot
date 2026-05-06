@@ -39,3 +39,28 @@ export function shuffle<T>(arr: T[]): T[] {
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * Sample from a normal distribution using the Box-Muller transform.
+ * Returns a single value with the given mean and standard deviation.
+ *
+ * Used by delta-neutral for trade-size variation.
+ */
+export function gaussian(mean: number, stddev: number): number {
+  // Avoid log(0) — Math.random() is [0,1), so u1 can be 0 in theory.
+  let u1 = Math.random();
+  while (u1 === 0) u1 = Math.random();
+  const u2 = Math.random();
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  return mean + stddev * z;
+}
+
+/**
+ * Sample from an exponential distribution with the given mean.
+ * Used by delta-neutral for inter-trade interval timing (Poisson arrivals).
+ */
+export function exponential(mean: number): number {
+  let u = Math.random();
+  while (u === 0) u = Math.random();
+  return -mean * Math.log(u);
+}
