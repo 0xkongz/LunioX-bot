@@ -70,6 +70,20 @@ export interface TradingParams {
    */
   maxPriceImpactBps: number;
   dcaBiasPercent: number;
+
+  // ─── Natural-trading parameters (delta_neutral only) ──────────────
+  /** Lower bound of daily drift target (%, e.g., 1 for 1%). */
+  dailyDriftMinPct: number;
+  /** Upper bound of daily drift target (%, e.g., 5 for 5%). */
+  dailyDriftMaxPct: number;
+  /** Strength of pull toward the weekly anchor in daily direction roll. */
+  anchorPullStrength: number;
+  /** Strength of bias toward today's target in within-day direction selection. */
+  biasStrength: number;
+  /** Standard deviation (as fraction of base) for gaussian trade sizing. */
+  tradeSizeSigma: number;
+  /** Per-tick probability of starting a 30–60 min quiet period. */
+  quietPeriodProbability: number;
 }
 
 // ─── Main Config ─────────────────────────────────────────────────────
@@ -196,6 +210,14 @@ export function loadConfig(): AppConfig {
       maxSlippageBps: parseInt(optionalEnv("MAX_SLIPPAGE_BPS", "100")),
       maxPriceImpactBps: parseInt(optionalEnv("MAX_PRICE_IMPACT_BPS", "1000")),
       dcaBiasPercent: parseFloat(optionalEnv("DCA_BIAS_PERCENT", "70")),
+      dailyDriftMinPct: parseFloat(optionalEnv("DAILY_DRIFT_MIN_PCT", "1")),
+      dailyDriftMaxPct: parseFloat(optionalEnv("DAILY_DRIFT_MAX_PCT", "5")),
+      anchorPullStrength: parseFloat(optionalEnv("ANCHOR_PULL_STRENGTH", "3")),
+      biasStrength: parseFloat(optionalEnv("BIAS_STRENGTH", "5")),
+      tradeSizeSigma: parseFloat(optionalEnv("TRADE_SIZE_SIGMA", "0.4")),
+      quietPeriodProbability: parseFloat(
+        optionalEnv("QUIET_PERIOD_PROBABILITY", "0.005")
+      ),
     },
     defaultWalletSelector: optionalEnv("DEFAULT_TOKEN_WALLETS", ""),
     dashboardPort: parseInt(optionalEnv("PORT", "3000")),

@@ -71,4 +71,32 @@ describe("loadConfig", () => {
     process.env.PANCAKE_V2_ROUTER = "not-an-address";
     expect(() => loadConfig()).toThrow(/PANCAKE_V2_ROUTER/);
   });
+
+  it("loads new natural-trading params with sensible defaults", () => {
+    process.env.WALLET_PRIVATE_KEYS = "0xaa";
+    const c = loadConfig();
+    expect(c.defaultTradingParams.dailyDriftMinPct).toBe(1);
+    expect(c.defaultTradingParams.dailyDriftMaxPct).toBe(5);
+    expect(c.defaultTradingParams.anchorPullStrength).toBe(3);
+    expect(c.defaultTradingParams.biasStrength).toBe(5);
+    expect(c.defaultTradingParams.tradeSizeSigma).toBe(0.4);
+    expect(c.defaultTradingParams.quietPeriodProbability).toBe(0.005);
+  });
+
+  it("respects env overrides for natural-trading params", () => {
+    process.env.WALLET_PRIVATE_KEYS = "0xaa";
+    process.env.DAILY_DRIFT_MIN_PCT = "0.5";
+    process.env.DAILY_DRIFT_MAX_PCT = "8";
+    process.env.ANCHOR_PULL_STRENGTH = "5";
+    process.env.BIAS_STRENGTH = "10";
+    process.env.TRADE_SIZE_SIGMA = "0.6";
+    process.env.QUIET_PERIOD_PROBABILITY = "0.01";
+    const c = loadConfig();
+    expect(c.defaultTradingParams.dailyDriftMinPct).toBe(0.5);
+    expect(c.defaultTradingParams.dailyDriftMaxPct).toBe(8);
+    expect(c.defaultTradingParams.anchorPullStrength).toBe(5);
+    expect(c.defaultTradingParams.biasStrength).toBe(10);
+    expect(c.defaultTradingParams.tradeSizeSigma).toBe(0.6);
+    expect(c.defaultTradingParams.quietPeriodProbability).toBe(0.01);
+  });
 });
