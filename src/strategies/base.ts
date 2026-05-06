@@ -166,4 +166,17 @@ export abstract class BaseStrategy {
   updateTokenConfig(tokenConfig: TokenConfig): void {
     this.tokenConfig = tokenConfig;
   }
+
+  /**
+   * Compute the wait time before the next trade decision (ms).
+   * Default: uniform-jitter on intervalSeconds (preserves DCA timing).
+   * Delta-neutral overrides this to use exponential (Poisson arrivals)
+   * for more natural-looking trade timing.
+   */
+  nextIntervalMs(): number {
+    const sec = this.params.intervalSeconds;
+    const variance = this.params.variancePercent / 100;
+    const factor = 1 + (Math.random() * 2 - 1) * variance;
+    return sec * factor * 1000;
+  }
 }
