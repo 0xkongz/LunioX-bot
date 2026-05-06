@@ -105,6 +105,8 @@ export interface AppConfig {
   // Registry persistence.
   tokensFile: string;
   trackerDataDir: string;
+  /** Path to the directory holding per-token weekly anchor JSON files. */
+  anchorDataDir: string;
 
   // Defaults applied to newly-registered tokens.
   defaultTradingParams: TradingParams;
@@ -175,6 +177,9 @@ export function loadConfig(): AppConfig {
   const trackerDataDir =
     optionalEnv("TRACKER_DATA_DIR", path.join(process.cwd(), "data", "tracker"));
 
+  const anchorDataDir =
+    optionalEnv("ANCHOR_DATA_DIR", path.join(process.cwd(), "data", "anchor"));
+
   return {
     rpcUrl: optionalEnv("BSC_RPC_URL", "https://bsc-dataseed1.binance.org"),
     chainId: parseInt(optionalEnv("CHAIN_ID", "56")),
@@ -185,6 +190,7 @@ export function loadConfig(): AppConfig {
     wbnbAddress: BSC_WBNB,
     tokensFile,
     trackerDataDir,
+    anchorDataDir,
     defaultTradingParams: {
       mode: (() => {
         const m = optionalEnv("DEFAULT_MODE", "stopped");

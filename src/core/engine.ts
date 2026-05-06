@@ -13,12 +13,12 @@ import { PriceFeed, PriceData } from "../services/price-feed";
 import { PriceUnavailableError, TokenValidationError } from "../services/errors";
 import { TokenRegistry } from "../services/token-registry";
 import { TokenDetector } from "../services/token-detector";
+import { WeeklyAnchor } from "../services/weekly-anchor";
 import { checkTokenHealth } from "./health";
 import { BaseStrategy, TradeDecision } from "../strategies/base";
 import { DeltaNeutralStrategy } from "../strategies/delta-neutral";
 import { DCABuyStrategy } from "../strategies/dca-buy";
 import { DCASellStrategy } from "../strategies/dca-sell";
-import { randomize } from "../utils/random";
 import { logger } from "../utils/logger";
 
 export interface TokenState {
@@ -41,6 +41,10 @@ export interface TokenState {
   nextTradeTime: number;
   walletIndices: number[];
   error?: string;
+  /** Set when token mode is delta_neutral. Null otherwise. */
+  weeklyAnchor: { price: number; setAt: string } | null;
+  /** Set when token mode is delta_neutral. Null otherwise. */
+  todayTarget: { open: number; target: number; openedAt: string } | null;
 }
 
 export interface EngineStatus {
@@ -79,11 +83,13 @@ export class TradingEngine {
   private strategies: Map<string, BaseStrategy> = new Map();
   private tokenStates: Map<string, TokenState> = new Map();
   private tokenTimers: Map<string, NodeJS.Timeout> = new Map();
+  private weeklyAnchors: Map<string, WeeklyAnchor> = new Map();
 
   private running = false;
   private startTime = 0;
   private balanceRefreshTimer: NodeJS.Timeout | null = null;
   private rebalanceTimer: NodeJS.Timeout | null = null;
+  private weeklyAnchorTimer: NodeJS.Timeout | null = null;
 
   constructor(config: AppConfig) {
     this.config = config;
@@ -135,6 +141,24 @@ export class TradingEngine {
     return this.tracker.resetToday(token.name);
   }
 
+  /**
+   * Manually reset the weekly anchor for a token. Used by the dashboard
+   * Reset Anchor button. Snapshots current price as the new anchor +
+   * today.open and rolls a fresh target.
+   */
+  resetTokenAnchor(tokenKey: string): boolean {
+    const anchor = this.weeklyAnchors.get(tokenKey.toUpperCase());
+    if (!anchor) return false;
+    anchor.resetAnchor();
+    return true;
+  }
+
+  /** Return the WeeklyAnchor state for the dashboard. */
+  getAnchorState(tokenKey: string): ReturnType<WeeklyAnchor["getState"]> | null {
+    const anchor = this.weeklyAnchors.get(tokenKey.toUpperCase());
+    return anchor ? anchor.getState() : null;
+  }
+
   // ─── Lifecycle ─────────────────────────────────────────────────────
 
   /**
@@ -143,6 +167,25 @@ export class TradingEngine {
    * token) and at runtime when a new token is added.
    */
   private bootstrapTokenState(token: TokenConfig): void {
+    // Create the per-token weekly anchor used by delta_neutral. Other
+    // modes ignore it. Constructing eagerly means a runtime mode switch
+    // to delta_neutral picks up state immediately without restart.
+    const anchor = new WeeklyAnchor(
+      token.key,
+      this.config.anchorDataDir,
+      () => {
+        const cached = this.priceFeed
+          .getAllPrices()
+          .find(
+            (p) =>
+              p.tokenAddress.toLowerCase() === token.address.toLowerCase()
+          );
+        return cached?.priceUsd ?? 0;
+      },
+      { ...this.config.defaultTradingParams }
+    );
+    this.weeklyAnchors.set(token.key, anchor);
+
     if (!token.enabled) {
       // We still maintain a state entry for disabled tokens so the
       // dashboard can show them and toggle them on without losing
@@ -162,6 +205,8 @@ export class TradingEngine {
         lastTradeTime: 0,
         nextTradeTime: 0,
         walletIndices: token.walletIndices,
+        weeklyAnchor: null,
+        todayTarget: null,
       });
       return;
     }
@@ -184,6 +229,8 @@ export class TradingEngine {
       lastTradeTime: 0,
       nextTradeTime: 0,
       walletIndices: token.walletIndices,
+      weeklyAnchor: null,
+      todayTarget: null,
     });
 
     this.createStrategy(token.key, token, params);
@@ -198,12 +245,17 @@ export class TradingEngine {
     let strategy: BaseStrategy;
 
     switch (params.mode) {
-      case "delta_neutral":
+      case "delta_neutral": {
+        const anchor = this.weeklyAnchors.get(key);
+        if (!anchor) {
+          throw new Error(`No weekly anchor for ${key}`);
+        }
         strategy = new DeltaNeutralStrategy(
           token, params, walletGroup,
-          this.tracker, this.swapService, this.priceFeed
+          this.tracker, this.swapService, this.priceFeed, anchor
         );
         break;
+      }
       case "dca_buy":
         strategy = new DCABuyStrategy(
           token, params, walletGroup,
@@ -216,11 +268,16 @@ export class TradingEngine {
           this.tracker, this.swapService, this.priceFeed
         );
         break;
-      default:
+      default: {
+        const anchor = this.weeklyAnchors.get(key);
+        if (!anchor) {
+          throw new Error(`No weekly anchor for ${key}`);
+        }
         strategy = new DeltaNeutralStrategy(
           token, params, walletGroup,
-          this.tracker, this.swapService, this.priceFeed
+          this.tracker, this.swapService, this.priceFeed, anchor
         );
+      }
     }
     this.strategies.set(key, strategy);
   }
@@ -273,6 +330,23 @@ export class TradingEngine {
       }
     }
 
+    // ── Start weekly anchor ticker (after price cache is warm) ──────
+    // Tick the weekly anchors every minute. Started here (after the
+    // price cache has been warmed) so the first tick doesn't bootstrap
+    // an anchor with price=0. Each tick is idempotent — safe to call
+    // multiple times in the same minute. Cleared by stop().
+    if (!this.weeklyAnchorTimer) {
+      this.weeklyAnchorTimer = setInterval(() => {
+        for (const [, a] of this.weeklyAnchors) {
+          try {
+            a.tick();
+          } catch (err: any) {
+            logger.error(`Anchor tick failed: ${err.message ?? err}`);
+          }
+        }
+      }, 60 * 1000);
+    }
+
     // ── Start loops for available + non-stopped tokens ─────────────
     for (const [key, state] of this.tokenStates) {
       if (!state.enabled || !state.available) continue;
@@ -298,6 +372,8 @@ export class TradingEngine {
     if (this.rebalanceTimer) clearInterval(this.rebalanceTimer);
     if (this.balanceRefreshTimer) clearInterval(this.balanceRefreshTimer);
     this.balanceRefreshTimer = null;
+    if (this.weeklyAnchorTimer) clearInterval(this.weeklyAnchorTimer);
+    this.weeklyAnchorTimer = null;
     this.tracker.flush();
     logger.info("=== Trading Engine Stopped ===");
   }
@@ -315,9 +391,10 @@ export class TradingEngine {
         return;
       }
 
-      const intervalMs =
-        randomize(state.params.intervalSeconds, state.params.variancePercent) *
-        1000;
+      const strategy = this.strategies.get(tokenKey);
+      const intervalMs = strategy
+        ? strategy.nextIntervalMs()
+        : state.params.intervalSeconds * 1000;
       state.nextTradeTime = Date.now() + intervalMs;
 
       const timer = setTimeout(async () => {
@@ -374,85 +451,17 @@ export class TradingEngine {
   }
 
   private async checkRebalances(): Promise<void> {
-    const hour = new Date().getUTCHours();
-    const isEndOfDay = hour >= 22;
-
-    for (const [key, state] of this.tokenStates) {
-      if (state.mode !== "delta_neutral") continue;
-
-      const rebalance = this.tracker.getRebalanceNeeded(state.tokenName);
-      if (!rebalance.needed) continue;
-
-      if (!isEndOfDay && rebalance.amountUsd < state.params.tradeAmountUsd * 3) {
-        continue;
-      }
-
-      logger.info(
-        `[Rebalance] ${state.tokenName} needs ${rebalance.direction} $${rebalance.amountUsd.toFixed(2)} to neutralize`
-      );
-
-      try {
-        const walletGroup = this.walletManager.getTokenGroup(key);
-        const token = this.registry.get(key);
-        if (!token) continue;
-
-        const amountIn =
-          rebalance.direction === "buy"
-            ? this.swapService.amountFromUsd(rebalance.amountUsd, token.pairDecimals)
-            : await this.priceFeed.usdToTokenAmount(rebalance.amountUsd, token);
-
-        // Same balance-aware fallback as BaseStrategy.execute() — skip
-        // the rebalance instead of failing on-chain.
-        const inputToken =
-          rebalance.direction === "buy" ? token.pairToken : token.address;
-        const preferred = walletGroup.nextRoundRobin();
-        const candidates = [
-          preferred,
-          ...walletGroup.getAll().filter((w) => w.index !== preferred.index),
-        ];
-        let chosen: typeof preferred | null = null;
-        for (const w of candidates) {
-          try {
-            const balance = await this.swapService.getTokenBalance(
-              w.address,
-              inputToken
-            );
-            if (balance >= amountIn) {
-              chosen = w;
-              break;
-            }
-          } catch {
-            // RPC blip — try next wallet.
-          }
-        }
-        if (!chosen) {
-          logger.warn(
-            `[Rebalance] ${state.tokenName} skipped — no wallet has enough ${rebalance.direction === "buy" ? "USDT" : token.name}`
-          );
-          continue;
-        }
-
-        const result = await this.swapService.executeSwap(
-          chosen.wallet,
-          token,
-          amountIn,
-          rebalance.direction,
-          state.params.maxSlippageBps,
-          state.params.maxPriceImpactBps
-        );
-
-        this.tracker.recordTrade(result, rebalance.amountUsd);
-      } catch (err: any) {
-        if (err instanceof PriceUnavailableError) {
-          logger.warn(
-            `[Rebalance] ${state.tokenName} skipped — price unavailable; will retry next hour`
-          );
-          continue;
-        }
-        logger.error(
-          `[Rebalance] ${state.tokenName} failed: ${err.message ?? err}`
-        );
-      }
+    // The hourly rebalance previously corrected delta_neutral net drift,
+    // but the new natural-drift design intentionally allows daily drift,
+    // so rebalance no longer applies. The loop is kept as a hook for
+    // future modes that need it.
+    for (const [, state] of this.tokenStates) {
+      // The hourly rebalance previously corrected delta_neutral net drift,
+      // but the new natural-drift design intentionally allows daily drift,
+      // so rebalance no longer applies. The loop is kept as a hook for
+      // future modes that need it.
+      void state;
+      continue;
     }
   }
 
@@ -589,6 +598,7 @@ export class TradingEngine {
       this.stopTokenLoop(key);
       this.strategies.delete(key);
       this.walletManager.removeTokenGroup(key);
+      this.weeklyAnchors.delete(key);
       if (state) {
         state.enabled = false;
         state.mode = "stopped";
@@ -613,6 +623,7 @@ export class TradingEngine {
     this.stopTokenLoop(k);
     this.strategies.delete(k);
     this.walletManager.removeTokenGroup(k);
+    this.weeklyAnchors.delete(k);
     this.tokenStates.delete(k);
     this.priceFeed.clearCache(token.address);
 
@@ -679,7 +690,14 @@ export class TradingEngine {
     const ordered: TokenState[] = [];
     for (const t of this.registry.list()) {
       const s = this.tokenStates.get(t.key);
-      if (s) ordered.push(s);
+      if (!s) continue;
+      const anchor = this.weeklyAnchors.get(t.key);
+      const anchorState = anchor?.getState();
+      ordered.push({
+        ...s,
+        weeklyAnchor: anchorState?.anchor ?? null,
+        todayTarget: anchorState?.today ?? null,
+      });
     }
     return {
       running: this.running,
