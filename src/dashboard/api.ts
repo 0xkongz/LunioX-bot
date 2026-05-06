@@ -179,6 +179,27 @@ export function createApiRouter(engine: TradingEngine, apiKey: string): Router {
     }
   );
 
+  // ─── POST /api/tokens/:key/reset-anchor ────────────────────────────
+  // Snapshot current price as the new weekly anchor + today.open, and
+  // roll a fresh daily target. Used by the dashboard's Reset Anchor
+  // button. Yesterday's tracker stats are untouched.
+  router.post("/tokens/:key/reset-anchor", (req: Request, res: Response) => {
+    try {
+      const { key } = req.params;
+      const ok = engine.resetTokenAnchor(key);
+      if (!ok) {
+        res
+          .status(404)
+          .json({ error: `Token "${key}" not found or no anchor configured` });
+        return;
+      }
+      const state = engine.getAnchorState(key);
+      res.json({ success: true, key: key.toUpperCase(), state });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // ─── POST /api/wallets/refresh ────────────────────────────────────
   // Force-refresh BNB balances on demand (in addition to the scheduled
   // refresh). The next /api/status response after this call will show

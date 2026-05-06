@@ -298,6 +298,14 @@
       const m = Math.floor((s % 3600) / 60);
       return `${h}h ${m}m uptime`;
     }
+    function fmtUtcTime(iso) {
+      try {
+        const d = new Date(iso);
+        const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${days[d.getUTCDay()]} ${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+      } catch { return iso; }
+    }
 
     // ─── Token toolbar / dropdown ──────────────────────────────────────
     function renderTokenFilter(tokens) {
@@ -459,6 +467,46 @@
       return selectedToken === '__ALL__' || token.tokenKey === selectedToken;
     }
 
+    function renderWeeklyCyclePanel(token, currentPriceUsd) {
+      if (token.mode !== 'delta_neutral') return '';
+      const anchor = token.weeklyAnchor;
+      const today = token.todayTarget;
+      if (!anchor || !today) {
+        return `
+          <div style="margin-top:12px;padding:10px;background:var(--bg);border:1px dashed var(--border);border-radius:8px;color:var(--muted);font-size:.8rem;">
+            Weekly cycle initializing (waiting for first tick + price)…
+          </div>`;
+      }
+      const driftPct = ((today.target - today.open) / today.open * 100);
+      const fromOpenPct = currentPriceUsd > 0
+        ? ((currentPriceUsd - today.open) / today.open * 100)
+        : 0;
+      const denom = today.target - today.open;
+      const num = currentPriceUsd - today.open;
+      const progress = Math.max(0, Math.min(100, denom !== 0 ? (num / denom) * 100 : 0));
+      const arrow = fromOpenPct >= 0 ? '↑' : '↓';
+
+      return `
+        <div style="margin-top:14px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
+          <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">
+            Weekly Cycle
+          </div>
+          <div style="display:grid;grid-template-columns:90px 1fr;gap:6px;font-size:.8rem;">
+            <span style="color:var(--muted);">Anchor</span>
+            <span>$${anchor.price.toFixed(6)} <span style="color:var(--muted);">${fmtUtcTime(anchor.setAt)}</span></span>
+            <span style="color:var(--muted);">Today</span>
+            <span>$${today.open.toFixed(6)} → $${today.target.toFixed(6)} <span style="color:${driftPct>=0?'var(--green)':'var(--red)'};">(${driftPct>=0?'+':''}${driftPct.toFixed(2)}%)</span></span>
+            <span style="color:var(--muted);">Now</span>
+            <span>$${currentPriceUsd.toFixed(6)} <span style="color:${fromOpenPct>=0?'var(--green)':'var(--red)'};">${arrow} ${Math.abs(fromOpenPct).toFixed(2)}% from open</span></span>
+            <span style="color:var(--muted);">Progress</span>
+            <span><div class="progress-bar" style="margin:6px 0 2px 0;"><div class="progress-fill" style="width:${progress}%;background:var(--accent);"></div></div><span style="color:var(--muted);font-size:.7rem;">${progress.toFixed(0)}% to target</span></span>
+          </div>
+          <div style="margin-top:10px;text-align:right;">
+            <button class="btn btn-ghost btn-sm" onclick="resetAnchor('${token.tokenKey}')" title="Snapshot current price as new weekly anchor + reroll today's target">↺ Reset Anchor</button>
+          </div>
+        </div>`;
+    }
+
     function renderTokenCards(data) {
       const container = document.getElementById('tokenCards');
       container.innerHTML = '';
@@ -524,6 +572,7 @@
               <div class="stat"><div class="stat-label">Sells</div><div class="stat-value sell">${summary ? summary.totalSellUsd.toFixed(0) : '0'}</div></div>
               <div class="stat"><div class="stat-label">Trades</div><div class="stat-value">${summary ? summary.tradeCount : '0'}</div></div>
             </div>
+            ${renderWeeklyCyclePanel(token, price ? price.priceUsd : 0)}
             <div style="margin-top:8px;font-size:.75rem;color:var(--muted);">
               Wallets: ${token.walletIndices && token.walletIndices.length ? token.walletIndices.map(i => '#' + (i+1)).join(', ') : 'none'}
             </div>
@@ -556,6 +605,30 @@
                 <div class="param-input">
                   <label>Max Price Impact (bps)</label>
                   <input type="number" value="${token.params.maxPriceImpactBps}" onchange="updateParam('${token.tokenKey}','maxPriceImpactBps',this.value)" title="On-curve impact ceiling. 1000 bps = 10%. Trade is rejected if exceeded." />
+                </div>
+                <div class="param-input">
+                  <label>Daily Drift Min (%)</label>
+                  <input type="number" step="0.1" value="${token.params.dailyDriftMinPct ?? 1}" onchange="updateParam('${token.tokenKey}','dailyDriftMinPct',this.value)" title="Lower bound of daily drift target. Default 1%." />
+                </div>
+                <div class="param-input">
+                  <label>Daily Drift Max (%)</label>
+                  <input type="number" step="0.1" value="${token.params.dailyDriftMaxPct ?? 5}" onchange="updateParam('${token.tokenKey}','dailyDriftMaxPct',this.value)" title="Upper bound of daily drift target. Default 5%." />
+                </div>
+                <div class="param-input">
+                  <label>Anchor Pull Strength</label>
+                  <input type="number" step="0.5" value="${token.params.anchorPullStrength ?? 3}" onchange="updateParam('${token.tokenKey}','anchorPullStrength',this.value)" title="How strongly daily direction is pulled toward Monday's anchor. 1 = gentle, 10 = strong. Default 3." />
+                </div>
+                <div class="param-input">
+                  <label>Direction Bias Strength</label>
+                  <input type="number" step="0.5" value="${token.params.biasStrength ?? 5}" onchange="updateParam('${token.tokenKey}','biasStrength',this.value)" title="How strongly intra-day trades are biased toward today's target. Higher = more directional. Default 5." />
+                </div>
+                <div class="param-input">
+                  <label>Trade Size Sigma</label>
+                  <input type="number" step="0.05" value="${token.params.tradeSizeSigma ?? 0.4}" onchange="updateParam('${token.tokenKey}','tradeSizeSigma',this.value)" title="Stddev of gaussian trade-size variation as fraction of base. 0.4 ≈ ±40%. Default 0.4." />
+                </div>
+                <div class="param-input">
+                  <label>Quiet Period Probability</label>
+                  <input type="number" step="0.001" value="${token.params.quietPeriodProbability ?? 0.005}" onchange="updateParam('${token.tokenKey}','quietPeriodProbability',this.value)" title="Per-tick chance to enter a 30–60 min quiet period. Default 0.005 ≈ once per ~3 hours." />
                 </div>
               </div>
               <div style="margin-top:14px;display:flex;justify-content:flex-end;">
@@ -680,6 +753,16 @@
         await fetchStatus();
       } catch (e) {
         alert(`Reset failed: ${e.message}`);
+      }
+    }
+
+    async function resetAnchor(tokenKey) {
+      if (!confirm(`Reset weekly anchor for ${tokenKey}? This snapshots the current price as the new anchor and rerolls today's target.`)) return;
+      try {
+        await api(`/tokens/${encodeURIComponent(tokenKey)}/reset-anchor`, 'POST');
+        await fetchStatus();
+      } catch (e) {
+        alert(`Reset anchor failed: ${e.message}`);
       }
     }
 
