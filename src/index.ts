@@ -1,6 +1,7 @@
 import { loadConfig } from "./config";
 import { TradingEngine } from "./core/engine";
 import { startDashboard } from "./dashboard/server";
+import { assertChainId } from "./services/provider";
 import { logger } from "./utils/logger";
 
 async function main() {
@@ -17,6 +18,11 @@ async function main() {
   logger.info(`V2 Router: ${config.v2RouterAddress}`);
   logger.info(`V2 Factory: ${config.v2FactoryAddress}`);
   logger.info(`Tokens file: ${config.tokensFile}`);
+
+  // The provider pins its network so ethers stops re-verifying the chain id on every request
+  // (see services/provider.ts). That verification has to happen exactly once instead, here,
+  // before any wallet is loaded or any trade is possible.
+  await assertChainId(config.rpcUrl, config.chainId);
 
   const engine = new TradingEngine(config);
 

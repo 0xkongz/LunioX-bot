@@ -1,12 +1,15 @@
-import { Contract, JsonRpcProvider, ethers } from "ethers";
+import { Contract, Interface, JsonRpcProvider, ethers } from "ethers";
 import { TokenConfig, AppConfig } from "../config";
 import { PriceUnavailableError } from "./errors";
+import { aggregate3 } from "./multicall";
 import { logger } from "../utils/logger";
 
 const V2_PAIR_ABI = [
   "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function token0() external view returns (address)",
 ];
+
+const PAIR_INTERFACE = new Interface(V2_PAIR_ABI);
 
 export interface PriceData {
   tokenName: string;
@@ -58,14 +61,54 @@ export class PriceFeed {
     pairAddress: string,
     wantedSideAddress: string
   ): Promise<{ wanted: bigint; other: bigint }> {
-    const pair = new Contract(pairAddress, V2_PAIR_ABI, this.provider);
-    const [r0, r1] = await pair.getReserves();
-    const token0 = await this.getToken0(pairAddress);
-    const wantedIsToken0 = wantedSideAddress.toLowerCase() === token0;
-    return {
-      wanted: BigInt(wantedIsToken0 ? r0 : r1),
-      other: BigInt(wantedIsToken0 ? r1 : r0),
-    };
+    const [sides] = await this.readReservesBySideBatch([
+      { pairAddress, wantedSideAddress },
+    ]);
+    return sides!;
+  }
+
+  /**
+   * The same read for several pairs at once, in ONE request.
+   *
+   * The wbnb-hop price is a product of two pairs' reserves. Read one after the
+   * other that is two billable requests AND two different blocks — a price
+   * assembled from a pool state that never simultaneously existed. `aggregate3`
+   * makes it one request and one block, so the batching and the correctness
+   * argument point the same way.
+   *
+   * `token0()` is immutable per pair and already cached, so it costs nothing
+   * after the first sighting of a pair.
+   */
+  private async readReservesBySideBatch(
+    pairs: Array<{ pairAddress: string; wantedSideAddress: string }>
+  ): Promise<Array<{ wanted: bigint; other: bigint }>> {
+    const token0s = await Promise.all(
+      pairs.map((p) => this.getToken0(p.pairAddress))
+    );
+
+    const results = await aggregate3(
+      this.provider,
+      pairs.map((p) => ({
+        target: p.pairAddress,
+        callData: PAIR_INTERFACE.encodeFunctionData("getReserves"),
+      }))
+    );
+
+    return pairs.map((p, i) => {
+      const result = results[i];
+      if (!result?.success) {
+        throw new PriceUnavailableError(`reserves read reverted for pair ${p.pairAddress}`);
+      }
+      const [r0, r1] = PAIR_INTERFACE.decodeFunctionResult(
+        "getReserves",
+        result.returnData
+      );
+      const wantedIsToken0 = p.wantedSideAddress.toLowerCase() === token0s[i];
+      return {
+        wanted: BigInt(wantedIsToken0 ? r0 : r1),
+        other: BigInt(wantedIsToken0 ? r1 : r0),
+      };
+    });
   }
 
   async getPrice(tokenConfig: TokenConfig): Promise<PriceData> {
@@ -96,14 +139,11 @@ export class PriceFeed {
             `Token ${tokenConfig.key} is wbnb-hop but missing wbnbUsdtPair`
           );
         }
-        const tokenWbnb = await this.readReservesBySide(
-          tokenConfig.pairAddress,
-          tokenConfig.address
-        );
-        const wbnbUsdt = await this.readReservesBySide(
-          tokenConfig.wbnbUsdtPair,
-          this.config.wbnbAddress
-        );
+        // Both legs in one request, at one block — see readReservesBySideBatch.
+        const [tokenWbnb, wbnbUsdt] = await this.readReservesBySideBatch([
+          { pairAddress: tokenConfig.pairAddress, wantedSideAddress: tokenConfig.address },
+          { pairAddress: tokenConfig.wbnbUsdtPair, wantedSideAddress: this.config.wbnbAddress },
+        ]);
 
         const reserveToken = tokenWbnb.wanted;
         const reserveWbnbA = tokenWbnb.other;

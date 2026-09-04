@@ -1,4 +1,5 @@
-import { ethers, Wallet, JsonRpcProvider } from "ethers";
+import { ethers, Wallet, JsonRpcProvider, Interface } from "ethers";
+import { aggregate3, MULTICALL3_ADDRESS } from "../services/multicall";
 import { logger } from "../utils/logger";
 
 export interface WalletInfo {
@@ -147,12 +148,42 @@ export class WalletManager {
     return this.tokenGroups.has(tokenKey);
   }
 
-  /** Refresh BNB balances for all wallets */
+  /**
+   * Refresh BNB balances for all wallets in ONE request.
+   *
+   * `eth_getBalance` is its own JSON-RPC method, so N wallets meant N billable
+   * requests every refresh no matter how they were issued — `Promise.all` made
+   * them concurrent, not fewer. Multicall3's `getEthBalance` is a contract
+   * read, so the whole fleet fits in a single `eth_call`.
+   *
+   * A wallet whose leg fails keeps its previous value: stale but true beats a
+   * zero an operator would read as "this wallet needs funding".
+   */
   async refreshBalances(): Promise<void> {
-    const promises = this.wallets.map(async (w) => {
-      w.bnbBalance = await this.provider.getBalance(w.address);
-    });
-    await Promise.all(promises);
+    if (this.wallets.length === 0) return;
+
+    const iface = new Interface([
+      "function getEthBalance(address addr) external view returns (uint256)",
+    ]);
+    const results = await aggregate3(
+      this.provider,
+      this.wallets.map((w) => ({
+        target: MULTICALL3_ADDRESS,
+        callData: iface.encodeFunctionData("getEthBalance", [w.address]),
+      }))
+    );
+
+    for (let i = 0; i < this.wallets.length; i++) {
+      const result = results[i];
+      if (!result?.success) {
+        logger.warn(
+          `BNB balance read failed for wallet ${i + 1} (${this.wallets[i].address}); keeping the previous value`
+        );
+        continue;
+      }
+      const [balance] = iface.decodeFunctionResult("getEthBalance", result.returnData);
+      this.wallets[i].bnbBalance = balance as bigint;
+    }
   }
 
   /** Get all wallets */
