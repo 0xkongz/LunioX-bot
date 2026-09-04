@@ -1,4 +1,5 @@
 import { JsonRpcProvider } from "ethers";
+import { connect } from "../services/provider";
 import {
   AppConfig,
   TokenConfig,
@@ -93,7 +94,7 @@ export class TradingEngine {
 
   constructor(config: AppConfig) {
     this.config = config;
-    this.provider = new JsonRpcProvider(config.rpcUrl, config.chainId);
+    this.provider = connect(config.rpcUrl, config.chainId);
     this.walletManager = new WalletManager(config.walletKeys, this.provider);
     this.tracker = new DailyTracker(config.trackerDataDir);
 
