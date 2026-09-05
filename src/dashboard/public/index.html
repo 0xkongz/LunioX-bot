@@ -48,6 +48,10 @@
     .param-input label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
     .param-input input { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
     .param-input input:focus { outline: none; border-color: var(--accent); }
+    /* Match the number inputs so the dropdowns sit flush in the param grid,
+       rather than inheriting the larger global select sizing. */
+    .param-input select { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem; }
+    .param-input select:focus { outline: none; border-color: var(--accent); }
     .btn { padding: 8px 18px; border-radius: 8px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 600; transition: all .15s; }
     .btn-primary { background: var(--accent); color: white; }
     .btn-primary:hover { opacity: .85; }
@@ -283,6 +287,10 @@
       if (!res.ok) {
         const err = new Error((data && data.error) || `HTTP ${res.status}`);
         err.status = res.status;
+        // Carry any structured fields through so callers can react to a
+        // recoverable rejection (e.g. the target-price confirmation) rather
+        // than only being able to show the message.
+        if (data && typeof data === 'object') Object.assign(err, data);
         throw err;
       }
       return data;
@@ -507,6 +515,49 @@
         </div>`;
     }
 
+    // Live readout of the price defense. Hidden entirely when no target is
+    // set, so operators running plain delta-neutral see no extra chrome.
+    function renderPriceDefense(token) {
+      const d = token.priceDefense;
+      if (!d) return '';
+
+      const gap = d.gapPct;
+      // gapPct is positive when the price sits BELOW the target, i.e. the
+      // bot needs to buy. Colour follows the price, not the sign.
+      const gapColor = gap > 0 ? 'var(--red)' : 'var(--green)';
+      const gapLabel = gap > 0
+        ? `${Math.abs(gap).toFixed(2)}% below target`
+        : `${Math.abs(gap).toFixed(2)}% above target`;
+
+      const leaning = d.pBuy > 0.55 ? 'buying' : d.pBuy < 0.45 ? 'selling' : 'balanced';
+      const leanColor = d.pBuy > 0.55 ? 'var(--green)' : d.pBuy < 0.45 ? 'var(--red)' : 'var(--muted)';
+
+      const statusRow = d.engaged
+        ? `<span style="color:var(--green);">Engaged</span>`
+        : `<span style="color:var(--muted);">Stood down after reaching target ${d.reachedAt ? fmtUtcTime(d.reachedAt) : ''}</span>`;
+
+      return `
+        <div style="margin-top:14px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
+          <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">
+            Price Defense
+          </div>
+          <div style="display:grid;grid-template-columns:90px 1fr;gap:6px;font-size:.8rem;">
+            <span style="color:var(--muted);">Target</span>
+            <span>$${d.targetPrice.toFixed(8)}</span>
+            <span style="color:var(--muted);">Now</span>
+            <span>$${d.livePrice.toFixed(8)} <span style="color:${gapColor};">${gapLabel}</span></span>
+            <span style="color:var(--muted);">P(buy)</span>
+            <span>${d.pBuy.toFixed(2)} <span style="color:${leanColor};">${leaning}</span></span>
+            <span style="color:var(--muted);">Status</span>
+            <span>${statusRow}</span>
+          </div>
+          ${d.engaged ? '' : `
+          <div style="margin-top:10px;text-align:right;">
+            <button class="btn btn-ghost btn-sm" onclick="rearmDefense('${token.tokenKey}')" title="Forget the recorded arrival and start defending the target again">↻ Re-arm Defense</button>
+          </div>`}
+        </div>`;
+    }
+
     function renderTokenCards(data) {
       const container = document.getElementById('tokenCards');
       container.innerHTML = '';
@@ -572,6 +623,7 @@
               <div class="stat"><div class="stat-label">Sells</div><div class="stat-value sell">${summary ? summary.totalSellUsd.toFixed(0) : '0'}</div></div>
               <div class="stat"><div class="stat-label">Trades</div><div class="stat-value">${summary ? summary.tradeCount : '0'}</div></div>
             </div>
+            ${renderPriceDefense(token)}
             ${renderWeeklyCyclePanel(token, price ? price.priceUsd : 0)}
             <div style="margin-top:8px;font-size:.75rem;color:var(--muted);">
               Wallets: ${token.walletIndices && token.walletIndices.length ? token.walletIndices.map(i => '#' + (i+1)).join(', ') : 'none'}
@@ -629,6 +681,44 @@
                 <div class="param-input">
                   <label>Quiet Period Probability</label>
                   <input type="number" step="0.001" value="${token.params.quietPeriodProbability ?? 0.005}" onchange="updateParam('${token.tokenKey}','quietPeriodProbability',this.value)" title="Per-tick chance to enter a 30–60 min quiet period. Default 0.005 ≈ once per ~3 hours." />
+                </div>
+                <div class="param-input">
+                  <label>Target Price</label>
+                  <input type="number" step="any" value="${token.params.targetPrice ?? 0}" onchange="updateParam('${token.tokenKey}','targetPrice',this.value)" title="The price level to defend. The bot skews toward it from any distance, unlike the weekly anchor which re-bases to today's open. 0 disables the defense." />
+                </div>
+                <div class="param-input">
+                  <label>Target Price Unit</label>
+                  <select onchange="updateParamText('${token.tokenKey}','targetPriceUnit',this.value)" title="Which way round the target is quoted. Sub-cent tokens are often easier to think about as tokens per dollar.">
+                    <option value="USD_PER_TOKEN" ${(token.params.targetPriceUnit ?? 'USD_PER_TOKEN') === 'USD_PER_TOKEN' ? 'selected' : ''}>USD per token</option>
+                    <option value="TOKEN_PER_USD" ${token.params.targetPriceUnit === 'TOKEN_PER_USD' ? 'selected' : ''}>Tokens per USD</option>
+                  </select>
+                </div>
+                <div class="param-input">
+                  <label>Defense Strength</label>
+                  <input type="number" step="0.5" value="${token.params.targetPriceStrength ?? 10}" onchange="updateParam('${token.tokenKey}','targetPriceStrength',this.value)" title="Multiplier on log(target / price). At 10, a 1% gap moves P(buy) by ~0.1 and a 10% gap saturates. Default 10." />
+                </div>
+                <div class="param-input">
+                  <label>Defense Mode</label>
+                  <select onchange="updateParamText('${token.tokenKey}','targetPriceMode',this.value)" title="Hold keeps defending the level indefinitely. Reach stands the defense down once the price first touches or crosses the target.">
+                    <option value="hold" ${(token.params.targetPriceMode ?? 'hold') === 'hold' ? 'selected' : ''}>Hold the level</option>
+                    <option value="reach" ${token.params.targetPriceMode === 'reach' ? 'selected' : ''}>Reach then stop</option>
+                  </select>
+                </div>
+                <div class="param-input">
+                  <label>Reach Tolerance (%)</label>
+                  <input type="number" step="0.1" value="${token.params.targetPriceReachedTolerancePct ?? 1}" onchange="updateParam('${token.tokenKey}','targetPriceReachedTolerancePct',this.value)" title="Band around the target that counts as arriving, in reach mode. Default 1%." />
+                </div>
+                <div class="param-input">
+                  <label>Max Deviation (%)</label>
+                  <input type="number" step="1" value="${token.params.targetPriceMaxDeviationPct ?? 10}" onchange="updateParam('${token.tokenKey}','targetPriceMaxDeviationPct',this.value)" title="Setting a target further than this from the live price asks for confirmation first — catches a mis-picked price unit. 0 disables the check." />
+                </div>
+                <div class="param-input">
+                  <label>P(buy) Min</label>
+                  <input type="number" step="0.05" min="0" max="1" value="${token.params.pBuyMin ?? 0.15}" onchange="updateParam('${token.tokenKey}','pBuyMin',this.value)" title="Floor on buy probability. Keeps counter-direction flow alive so the bot never trades fully one-sided. Default 0.15." />
+                </div>
+                <div class="param-input">
+                  <label>P(buy) Max</label>
+                  <input type="number" step="0.05" min="0" max="1" value="${token.params.pBuyMax ?? 0.85}" onchange="updateParam('${token.tokenKey}','pBuyMax',this.value)" title="Ceiling on buy probability. Default 0.85." />
                 </div>
               </div>
               <div style="margin-top:14px;display:flex;justify-content:flex-end;">
@@ -727,9 +817,33 @@
     }
 
     async function updateParam(token, key, value) {
-      const params = {};
-      params[key] = parseFloat(value);
-      try { await api('/params', 'POST', { token, params }); } catch (e) { alert(e.message); }
+      await applyParams(token, { [key]: parseFloat(value) });
+    }
+
+    // Params whose value is a string (the two dropdowns) rather than a number.
+    async function updateParamText(token, key, value) {
+      await applyParams(token, { [key]: value });
+    }
+
+    // A target price far from the live price comes back as 409 rather than
+    // being applied. That is almost always a mis-picked price unit, so ask
+    // before committing the bot to defending a level it can never reach.
+    async function applyParams(token, params) {
+      try {
+        await api('/params', 'POST', { token, params });
+      } catch (e) {
+        if (e.status === 409 && e.needsConfirmation) {
+          if (!confirm(e.message + '\n\nApply it anyway?')) { await fetchStatus(); return; }
+          try {
+            await api('/params', 'POST', { token, params, force: true });
+          } catch (e2) {
+            alert(e2.message);
+          }
+        } else {
+          alert(e.message);
+        }
+      }
+      await fetchStatus();
     }
 
     async function startEngine() {
@@ -763,6 +877,16 @@
         await fetchStatus();
       } catch (e) {
         alert(`Reset anchor failed: ${e.message}`);
+      }
+    }
+
+    async function rearmDefense(tokenKey) {
+      if (!confirm(`Re-arm the price defense for ${tokenKey}? The bot will start pushing toward the target price again.`)) return;
+      try {
+        await api(`/tokens/${encodeURIComponent(tokenKey)}/rearm-defense`, 'POST');
+        await fetchStatus();
+      } catch (e) {
+        alert(`Re-arm failed: ${e.message}`);
       }
     }
 

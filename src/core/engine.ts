@@ -6,12 +6,22 @@ import {
   TradingMode,
   TradingParams,
   parseWalletSelector,
+  validatePriceDefenseParams,
 } from "../config";
+import {
+  buyProbability,
+  targetDeviation,
+  targetPriceUsd,
+} from "../strategies/price-defense";
 import { WalletManager } from "./wallet-manager";
 import { DailyTracker } from "./tracker";
 import { SwapService } from "../services/swap";
 import { PriceFeed, PriceData } from "../services/price-feed";
-import { PriceUnavailableError, TokenValidationError } from "../services/errors";
+import {
+  PriceUnavailableError,
+  TargetPriceGuardError,
+  TokenValidationError,
+} from "../services/errors";
 import { TokenRegistry } from "../services/token-registry";
 import { TokenDetector } from "../services/token-detector";
 import { WeeklyAnchor } from "../services/weekly-anchor";
@@ -46,6 +56,25 @@ export interface TokenState {
   weeklyAnchor: { price: number; setAt: string } | null;
   /** Set when token mode is delta_neutral. Null otherwise. */
   todayTarget: { open: number; target: number; openedAt: string } | null;
+  /**
+   * Live price-defense readout, or null when no target price is set.
+   * Lets an operator see at a glance whether the defense is actually
+   * pushing — a P(buy) sitting at 0.5 with a 20% gap means something is
+   * misconfigured, and that is invisible from trade history alone.
+   */
+  priceDefense: {
+    /** Target normalised to USD per whole token. */
+    targetPrice: number;
+    livePrice: number;
+    /** Positive when the price sits below target. */
+    gapPct: number;
+    /** Probability the next trade is a buy. */
+    pBuy: number;
+    /** ISO timestamp of reach-mode arrival, if any. */
+    reachedAt: string | null;
+    /** False once reach mode has stood the defense down. */
+    engaged: boolean;
+  } | null;
 }
 
 export interface EngineStatus {
@@ -154,6 +183,17 @@ export class TradingEngine {
     return true;
   }
 
+  /**
+   * Forget a reach-mode arrival for one token so the defense engages
+   * again. Used by the dashboard's re-arm button.
+   */
+  rearmPriceDefense(tokenKey: string): boolean {
+    const anchor = this.weeklyAnchors.get(tokenKey.toUpperCase());
+    if (!anchor) return false;
+    anchor.clearTargetReached();
+    return true;
+  }
+
   /** Return the WeeklyAnchor state for the dashboard. */
   getAnchorState(tokenKey: string): ReturnType<WeeklyAnchor["getState"]> | null {
     const anchor = this.weeklyAnchors.get(tokenKey.toUpperCase());
@@ -168,6 +208,20 @@ export class TradingEngine {
    * token) and at runtime when a new token is added.
    */
   private bootstrapTokenState(token: TokenConfig): void {
+    // One params object per token, shared by the token state, the strategy
+    // and the weekly anchor.
+    //
+    // Sharing the reference rather than handing each collaborator its own
+    // copy is what makes a dashboard edit reach all three. The anchor used
+    // to be constructed with a snapshot of the boot-time defaults and never
+    // heard about a runtime change again, so drift bounds, anchor pull and
+    // — now — the target price were silently frozen at whatever the env
+    // said at start-up.
+    const params: TradingParams = {
+      ...this.config.defaultTradingParams,
+      ...(token.enabled ? {} : { mode: "stopped" as TradingMode }),
+    };
+
     // Create the per-token weekly anchor used by delta_neutral. Other
     // modes ignore it. Constructing eagerly means a runtime mode switch
     // to delta_neutral picks up state immediately without restart.
@@ -183,7 +237,7 @@ export class TradingEngine {
           );
         return cached?.priceUsd ?? 0;
       },
-      { ...this.config.defaultTradingParams }
+      params
     );
     this.weeklyAnchors.set(token.key, anchor);
 
@@ -200,7 +254,7 @@ export class TradingEngine {
         wbnbUsdtPair: token.wbnbUsdtPair ?? "",
         enabled: false,
         mode: "stopped",
-        params: { ...this.config.defaultTradingParams, mode: "stopped" },
+        params,
         running: false,
         available: false,
         lastTradeTime: 0,
@@ -208,12 +262,12 @@ export class TradingEngine {
         walletIndices: token.walletIndices,
         weeklyAnchor: null,
         todayTarget: null,
+        priceDefense: null,
       });
       return;
     }
 
     this.walletManager.createTokenGroup(token.key, token.walletIndices);
-    const params: TradingParams = { ...this.config.defaultTradingParams };
 
     this.tokenStates.set(token.key, {
       tokenName: token.name,
@@ -232,6 +286,7 @@ export class TradingEngine {
       walletIndices: token.walletIndices,
       weeklyAnchor: null,
       todayTarget: null,
+      priceDefense: null,
     });
 
     this.createStrategy(token.key, token, params);
@@ -664,15 +719,95 @@ export class TradingEngine {
     logger.info(`[${state.tokenName}] Mode changed to: ${mode}`);
   }
 
-  updateParams(tokenKey: string, params: Partial<TradingParams>): void {
+  /**
+   * Apply a runtime param patch to one token.
+   *
+   * Beyond the plain assignment this does three things the price defense
+   * needs: it validates the new values, it refuses a target price that
+   * looks like a unit mix-up unless the caller forces it, and it re-arms
+   * reach mode when the goal actually changes.
+   *
+   * @param opts.force bypass the target-price deviation guard.
+   */
+  updateParams(
+    tokenKey: string,
+    params: Partial<TradingParams>,
+    opts: { force?: boolean } = {}
+  ): void {
     const state = this.tokenStates.get(tokenKey);
     const strategy = this.strategies.get(tokenKey);
     if (!state) throw new Error(`Unknown token: ${tokenKey}`);
 
+    validatePriceDefenseParams(params);
+
+    const touchesTarget =
+      params.targetPrice !== undefined || params.targetPriceUnit !== undefined;
+    if (touchesTarget && !opts.force) {
+      this.assertTargetPriceSane(tokenKey, {
+        ...state.params,
+        ...params,
+      });
+    }
+
+    // Compare before assigning: the dashboard re-sends every field on
+    // apply, so identical values must not count as a change and reset a
+    // reach-mode arrival the operator is still relying on.
+    const goalChanged = (
+      ["targetPrice", "targetPriceUnit", "targetPriceMode"] as const
+    ).some((k) => params[k] !== undefined && params[k] !== state.params[k]);
+
     Object.assign(state.params, params);
     if (strategy) strategy.updateParams(params);
 
+    // The anchor normally shares state.params outright, so this is a no-op
+    // — but anchors constructed with a detached copy (tests, and any future
+    // caller) still need to see the change.
+    const anchor = this.weeklyAnchors.get(tokenKey.toUpperCase());
+    anchor?.updateParams(params);
+    if (goalChanged) anchor?.clearTargetReached();
+
     logger.info(`[${state.tokenName}] Params updated: ${JSON.stringify(params)}`);
+  }
+
+  /**
+   * Reject a target price that sits absurdly far from the live price.
+   *
+   * USD_PER_TOKEN and TOKEN_PER_USD differ by orders of magnitude for a
+   * sub-cent token, so a mis-picked unit does not look wrong on the form —
+   * it looks wrong only once the bot has spent the day buying into a
+   * target it can never reach. Skipped when the guard is disabled, when
+   * the defense is being switched off, or when there is no live price to
+   * compare against (a cold cache must not block configuration).
+   */
+  private assertTargetPriceSane(
+    tokenKey: string,
+    params: TradingParams
+  ): void {
+    const limit = params.targetPriceMaxDeviationPct;
+    if (!limit || limit <= 0) return;
+
+    const target = targetPriceUsd(params);
+    if (!target) return; // 0 disables the defense — nothing to guard.
+
+    const token = this.registry.get(tokenKey);
+    if (!token) return;
+    const cached = this.priceFeed
+      .getAllPrices()
+      .find(
+        (p) => p.tokenAddress.toLowerCase() === token.address.toLowerCase()
+      );
+    const live = cached?.priceUsd ?? 0;
+    if (!(live > 0)) return;
+
+    const deviationPct = Math.abs(targetDeviation(live, params)) * 100;
+    if (deviationPct <= limit) return;
+
+    throw new TargetPriceGuardError({
+      livePrice: live,
+      targetPrice: target,
+      deviationPct,
+      maxDeviationPct: limit,
+    });
   }
 
   addWallet(
@@ -698,6 +833,7 @@ export class TradingEngine {
         ...s,
         weeklyAnchor: anchorState?.anchor ?? null,
         todayTarget: anchorState?.today ?? null,
+        priceDefense: this.priceDefenseStatus(t, s, anchor, anchorState),
       });
     }
     return {
@@ -708,6 +844,54 @@ export class TradingEngine {
       dailySummary: this.tracker.getDashboardSummary(),
       recentTrades: this.tracker.getRecentTrades(50),
       prices: this.priceFeed.getAllPrices(),
+    };
+  }
+
+  /**
+   * Build the dashboard's price-defense readout for one token, mirroring
+   * exactly what DeltaNeutralStrategy.decide() would compute right now.
+   *
+   * Returns null when the operator has configured no target, so the panel
+   * stays hidden rather than showing a row of zeroes.
+   */
+  private priceDefenseStatus(
+    token: TokenConfig,
+    state: TokenState,
+    anchor: WeeklyAnchor | undefined,
+    anchorState: ReturnType<WeeklyAnchor["getState"]> | undefined
+  ): TokenState["priceDefense"] {
+    const configured = targetPriceUsd(state.params);
+    if (!configured || !anchor) return null;
+
+    const reached = anchor.targetReached();
+    const defense = anchor.effectiveParams();
+    // In reach mode after arrival the effective target is zeroed; keep
+    // showing the configured level so the panel does not blank out at
+    // exactly the moment the operator wants to see what happened.
+    const engaged = targetPriceUsd(defense) > 0;
+
+    const cached = this.priceFeed
+      .getAllPrices()
+      .find(
+        (p) => p.tokenAddress.toLowerCase() === token.address.toLowerCase()
+      );
+    const livePrice = cached?.priceUsd ?? 0;
+
+    const today = anchorState?.today ?? null;
+    const r =
+      today && livePrice > 0 ? (today.target - livePrice) / livePrice : 0;
+
+    return {
+      targetPrice: configured,
+      livePrice,
+      gapPct: livePrice > 0 ? (configured / livePrice - 1) * 100 : 0,
+      pBuy: buyProbability(
+        livePrice,
+        defense,
+        anchor.directionBiasForTrade(r)
+      ),
+      reachedAt: reached?.at ?? null,
+      engaged,
     };
   }
 

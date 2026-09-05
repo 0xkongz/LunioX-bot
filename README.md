@@ -109,6 +109,73 @@ Important defaults:
 
 See `.env.example` for the full list with defaults.
 
+## Price defense (delta_neutral mode)
+
+Delta-neutral mode combines two direction signals. They answer different
+questions and neither substitutes for the other.
+
+**The weekly anchor** asks *where has this token been drifting?* Every
+morning at 00:00 UTC it rolls a fresh daily target 1–5% from today's open,
+pulled gently toward Monday's anchor. This produces natural-looking tape,
+but it cannot hold a level: because it re-bases to today's open, a
+sustained sell-off simply drags the target down with it. Set a target 5%
+above a price that fell 20% overnight and the bot is still, correctly by
+its own logic, aiming below where the token started.
+
+**The price defense** asks *where should this token be?* — from a level you
+fix. It contributes an additive skew of `strength × log(target / price)` to
+the buy probability. The gap does not shrink because the market moved, so
+the buy pressure persists for exactly as long as the discount does. This is
+the mechanism the SPRK and SYMETRAX bots use to hold a price.
+
+With a target set, the anchor becomes texture on top of a floor rather than
+the thing steering direction: the daily drift roll re-centres on the
+defended price, and the intra-day bias is added to the defense skew before
+the result is clamped to `[BUY_PROB_MIN, BUY_PROB_MAX]`.
+
+Leave `TARGET_PRICE` at `0` and none of this engages — the bot behaves
+exactly as it did before.
+
+### Setting it up
+
+Per token, from the dashboard param grid (or via env for new-token
+defaults):
+
+| Setting | What it does |
+| --- | --- |
+| `Target Price` | The level to defend. `0` disables. |
+| `Target Price Unit` | `USD per token` or `Tokens per USD` — whichever is easier to type. |
+| `Defense Strength` | Multiplier on the log gap. At 10, a 1% gap moves P(buy) by ~0.1; a 10% gap saturates. |
+| `Defense Mode` | `Hold the level` defends indefinitely. `Reach then stop` stands down on arrival. |
+| `Reach Tolerance (%)` | Band that counts as arriving, in reach mode. |
+| `Max Deviation (%)` | Confirmation threshold for a target far from the live price. |
+| `P(buy) Min` / `P(buy) Max` | Clamp on the combined signal. |
+
+The **Price Defense** panel on each token card shows the target, the live
+price, the current gap and the resulting P(buy). If P(buy) sits near 0.50
+while the gap is wide, the defense is not doing anything — check that the
+mode is `delta_neutral` and that reach mode has not already stood down.
+
+### Two things worth knowing
+
+**Reach mode is persisted.** Once the price touches the target, the arrival
+is written to the anchor file, so a redeploy does not resume pushing a
+target that was already met. Changing the target price or its unit re-arms
+the defense automatically; the panel's *Re-arm Defense* button does it
+without changing the number.
+
+Arrival counts either when the price lands inside the tolerance band or
+when it crosses the target outright — a thin pool can gap straight over a
+1% band in a single trade, and without the crossing check the bot would
+keep buying a price that already overshot.
+
+**The deviation guard catches unit mix-ups.** `USD_PER_TOKEN` and
+`TOKEN_PER_USD` differ by orders of magnitude for a sub-cent token, and a
+mis-picked unit does not look wrong on the form — it looks wrong only after
+the bot has spent a day buying toward a target it can never reach. Applying
+a target further than `Max Deviation (%)` from the live price returns HTTP
+409 and asks for confirmation first. Set it to `0` to disable.
+
 ## Railway deployment
 
 The whole point of `TOKENS_FILE` is that you can deploy this image, add

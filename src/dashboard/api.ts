@@ -2,7 +2,10 @@ import crypto from "crypto";
 import { Router, Request, Response, NextFunction } from "express";
 import { TradingEngine } from "../core/engine";
 import { TradingMode, TradingParams } from "../config";
-import { TokenValidationError } from "../services/errors";
+import {
+  TargetPriceGuardError,
+  TokenValidationError,
+} from "../services/errors";
 import { logger } from "../utils/logger";
 
 export function createApiRouter(engine: TradingEngine, apiKey: string): Router {
@@ -67,12 +70,31 @@ export function createApiRouter(engine: TradingEngine, apiKey: string): Router {
   });
 
   // ─── POST /api/params ─────────────────────────────────────────────
+  // Body: { token, params, force? }
+  //
+  // A target price further from the live price than the configured limit
+  // comes back as 409 with `needsConfirmation`, so the dashboard can show
+  // a confirm dialog instead of a dead-end error. Re-post with force:true
+  // to apply it.
   router.post("/params", (req: Request, res: Response) => {
     try {
-      const { token, params } = req.body;
-      engine.updateParams(token, params as Partial<TradingParams>);
+      const { token, params, force } = req.body;
+      engine.updateParams(token, params as Partial<TradingParams>, {
+        force: force === true,
+      });
       res.json({ success: true, token, params });
     } catch (e: any) {
+      if (e instanceof TargetPriceGuardError) {
+        res.status(409).json({
+          error: e.message,
+          needsConfirmation: true,
+          livePrice: e.livePrice,
+          targetPrice: e.targetPrice,
+          deviationPct: e.deviationPct,
+          maxDeviationPct: e.maxDeviationPct,
+        });
+        return;
+      }
       res.status(400).json({ error: e.message });
     }
   });
@@ -195,6 +217,26 @@ export function createApiRouter(engine: TradingEngine, apiKey: string): Router {
       }
       const state = engine.getAnchorState(key);
       res.json({ success: true, key: key.toUpperCase(), state });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ─── POST /api/tokens/:key/rearm-defense ───────────────────────────
+  // Forget a reach-mode arrival and start defending the target again,
+  // without having to nudge the target price to a different number just
+  // to trigger the automatic re-arm.
+  router.post("/tokens/:key/rearm-defense", (req: Request, res: Response) => {
+    try {
+      const { key } = req.params;
+      const ok = engine.rearmPriceDefense(key);
+      if (!ok) {
+        res
+          .status(404)
+          .json({ error: `Token "${key}" not found or no anchor configured` });
+        return;
+      }
+      res.json({ success: true, key: key.toUpperCase() });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
