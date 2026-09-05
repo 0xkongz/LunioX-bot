@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
-import { TradingParams } from "../config";
+import { TargetPriceUnit, TradingParams } from "../config";
+import { targetPriceUsd } from "../strategies/price-defense";
 import { logger } from "../utils/logger";
 
 /**
@@ -20,13 +21,31 @@ interface TodayRecord {
   openedAt: string; // ISO timestamp
 }
 
-interface AnchorFile {
-  version: 1;
-  anchor: AnchorRecord | null;
-  today: TodayRecord | null;
+/**
+ * Set once a "reach"-mode target has been hit. Carries the goal it was
+ * recorded against so that moving the target re-arms the defense instead
+ * of leaving it permanently stood down.
+ */
+interface ReachedRecord {
+  price: number;
+  unit: TargetPriceUnit;
+  at: string; // ISO timestamp
 }
 
-const EMPTY: AnchorFile = { version: 1, anchor: null, today: null };
+interface AnchorFile {
+  version: 2;
+  anchor: AnchorRecord | null;
+  today: TodayRecord | null;
+  /** Non-null only in "reach" mode, once the target has been touched. */
+  reached: ReachedRecord | null;
+}
+
+const EMPTY: AnchorFile = {
+  version: 2,
+  anchor: null,
+  today: null,
+  reached: null,
+};
 
 /**
  * Per-token weekly anchor + daily drift target manager.
@@ -43,6 +62,13 @@ export class WeeklyAnchor {
   private priceSource: PriceSource;
   private params: TradingParams;
   readonly tokenKey: string;
+  /**
+   * Which side of the target the price was last seen on (-1 above, +1
+   * below, 0 unknown). In-memory only: it exists to catch a price that
+   * jumps clean over the tolerance band between two ticks, and a restart
+   * simply re-learns it on the next observation.
+   */
+  private targetSide = 0;
 
   constructor(
     tokenKey: string,
@@ -63,6 +89,16 @@ export class WeeklyAnchor {
   /** Current state snapshot — for dashboard reads and tests. */
   getState(): AnchorFile {
     return JSON.parse(JSON.stringify(this.state));
+  }
+
+  /**
+   * Adopt a runtime param change. The engine hands the anchor the same
+   * params object the strategy holds, so this is normally a no-op — but a
+   * caller that passes a detached copy still needs a way to keep the
+   * anchor in step, and tests rely on it.
+   */
+  updateParams(patch: Partial<TradingParams>): void {
+    Object.assign(this.params, patch);
   }
 
   /**
@@ -121,6 +157,107 @@ export class WeeklyAnchor {
     return 0.5 + bias;
   }
 
+  /**
+   * The anchor's contribution to P(buy), as an additive bias around 0
+   * rather than a probability. The price defense adds its own term on top,
+   * so the two signals have to compose; returning a bias keeps the 0.5
+   * baseline in one place (buyProbability) instead of two.
+   */
+  directionBiasForTrade(driftRemaining: number): number {
+    return this.directionProbabilityForTrade(driftRemaining) - 0.5;
+  }
+
+  // ─── Reach mode ──────────────────────────────────────────────────
+
+  /**
+   * The recorded arrival for the *currently configured* goal, or null.
+   *
+   * Matching on price and unit is what makes a retarget re-arm the
+   * defense: a stale record from a previous goal never counts, so the
+   * operator moving the target does not silently leave the bot stood down.
+   */
+  targetReached(): ReachedRecord | null {
+    const r = this.state.reached;
+    if (!r) return null;
+    if (this.params.targetPriceMode !== "reach") return null;
+    const goal = this.params.targetPrice ?? 0;
+    if (!goal || goal <= 0) return null;
+    const unit = this.params.targetPriceUnit ?? "USD_PER_TOKEN";
+    if (r.price !== goal || r.unit !== unit) return null;
+    return r;
+  }
+
+  /**
+   * The params the strategy should actually trade on. Identical to the
+   * configured params except in reach mode after arrival, where the target
+   * is zeroed — which switches the price defense off and leaves the token
+   * trading pure delta-neutral around wherever it landed.
+   */
+  effectiveParams(): TradingParams {
+    if (!this.targetReached()) return this.params;
+    return { ...this.params, targetPrice: 0 };
+  }
+
+  /**
+   * Feed the live price in so reach mode can notice arrival. No-op in hold
+   * mode, with no target set, or once already recorded.
+   *
+   * Arrival counts either when the price lands inside the tolerance band
+   * or when it crosses the target outright — a thin pool can gap straight
+   * over a 1% band in a single trade, and without the crossing check the
+   * bot would keep pushing a price that already overshot.
+   */
+  observePrice(priceUsd: number, now: Date = new Date()): void {
+    if (this.params.targetPriceMode !== "reach") {
+      this.targetSide = 0;
+      return;
+    }
+    const goal = this.params.targetPrice ?? 0;
+    if (!goal || goal <= 0) {
+      this.targetSide = 0;
+      return;
+    }
+    if (this.targetReached()) return;
+
+    const target = targetPriceUsd(this.params);
+    if (!target || !(priceUsd > 0)) return;
+
+    const dev = target / priceUsd - 1; // > 0: below target, < 0: above
+    const side = dev > 0 ? 1 : -1;
+    const tolerance = (this.params.targetPriceReachedTolerancePct ?? 0) / 100;
+    const within = Math.abs(dev) <= tolerance;
+    const crossed = this.targetSide !== 0 && side !== this.targetSide;
+
+    if (!within && !crossed) {
+      this.targetSide = side;
+      return;
+    }
+
+    this.state.reached = {
+      price: goal,
+      unit: this.params.targetPriceUnit ?? "USD_PER_TOKEN",
+      at: now.toISOString(),
+    };
+    this.targetSide = 0;
+    this.saveToDisk();
+    logger.info(
+      `[WeeklyAnchor:${this.tokenKey}] Target price reached (${priceUsd} vs ${target}) — ` +
+        `skew disengaged, continuing delta-neutral`
+    );
+  }
+
+  /**
+   * Forget any recorded arrival and re-arm the defense. Called when the
+   * operator changes the goal or flips the mode.
+   */
+  clearTargetReached(): void {
+    this.targetSide = 0;
+    if (!this.state.reached) return;
+    this.state.reached = null;
+    this.saveToDisk();
+    logger.info(`[WeeklyAnchor:${this.tokenKey}] Reach-state cleared — defense re-armed`);
+  }
+
   // ─── Internals ──────────────────────────────────────────────────────
 
   /** Synchronous price snapshot for tick paths. Async sources unsupported here. */
@@ -172,12 +309,30 @@ export class WeeklyAnchor {
   }
 
   /**
+   * The price the daily drift is pulled back toward.
+   *
+   * With no defense configured this is Monday's anchor, and the token
+   * wanders wherever the week takes it. With a target set, the target
+   * becomes the centre of gravity instead — which is the whole point of
+   * the defense: a day that opens 20% under the target rolls its drift
+   * upward with near-certainty, rather than treating the sold-off price
+   * as the new normal the way an anchor re-based to today's open does.
+   *
+   * In reach mode after arrival the target is already zeroed out by
+   * effectiveParams(), so this falls back to the anchor on its own.
+   */
+  private gravityPrice(anchorPrice: number): number {
+    return targetPriceUsd(this.effectiveParams()) || anchorPrice;
+  }
+
+  /**
    * Compute today's target price = today.open × (1 + signedDrift), where
-   * signed drift is rolled with anchor-pull bias on direction and uniform
+   * signed drift is rolled with gravity-pull bias on direction and uniform
    * random magnitude.
    */
   private computeTarget(open: number, anchorPrice: number): number {
-    const d = anchorPrice === 0 ? 0 : (open - anchorPrice) / anchorPrice;
+    const gravity = this.gravityPrice(anchorPrice);
+    const d = gravity === 0 ? 0 : (open - gravity) / gravity;
     const pUp = this.directionProbabilityForRoll(d);
     const sign = Math.random() < pUp ? 1 : -1;
     const minPct = this.params.dailyDriftMinPct / 100;
@@ -246,7 +401,7 @@ export class WeeklyAnchor {
     }
     try {
       const raw = fs.readFileSync(this.filePath, "utf-8");
-      const parsed = JSON.parse(raw);
+      const parsed = this.migrate(JSON.parse(raw));
       if (!this.isValidAnchorFile(parsed)) {
         logger.warn(
           `[WeeklyAnchor:${this.tokenKey}] invalid shape in ${this.filePath}, resetting`
@@ -269,9 +424,35 @@ export class WeeklyAnchor {
    * field access. anchor/today may be null (uninitialized state); when
    * present they must have all expected fields with correct types.
    */
+  /**
+   * Bring a file written by an older build up to the current shape.
+   *
+   * v1 predates the price defense and simply has no `reached` field.
+   * Discarding those files instead would throw away a live weekly anchor
+   * on the deploy that ships this change, re-basing every token to
+   * whatever the price happened to be at restart.
+   */
+  private migrate(v: any): any {
+    if (!v || typeof v !== "object") return v;
+    if (v.version === 1) {
+      return { ...v, version: 2, reached: null };
+    }
+    return v;
+  }
+
   private isValidAnchorFile(v: any): v is AnchorFile {
     if (!v || typeof v !== "object") return false;
-    if (v.version !== 1) return false;
+    if (v.version !== 2) return false;
+    if (v.reached !== null && v.reached !== undefined) {
+      if (
+        typeof v.reached !== "object" ||
+        typeof v.reached.price !== "number" ||
+        typeof v.reached.unit !== "string" ||
+        typeof v.reached.at !== "string"
+      ) {
+        return false;
+      }
+    }
     if (v.anchor !== null) {
       if (
         !v.anchor ||

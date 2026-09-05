@@ -54,6 +54,18 @@ export interface TokenConfig {
 // ─── Trading Mode ────────────────────────────────────────────────────
 export type TradingMode = "delta_neutral" | "dca_buy" | "dca_sell" | "stopped";
 
+// ─── Price Defense ───────────────────────────────────────────────────
+
+/**
+ * Which way round the operator quoted the target price. Tokens priced far
+ * below a dollar read more naturally as "tokens per dollar", so both
+ * conventions are accepted and normalised internally.
+ */
+export type TargetPriceUnit = "USD_PER_TOKEN" | "TOKEN_PER_USD";
+
+/** Whether the defense persists past the target or stands down on arrival. */
+export type TargetPriceMode = "hold" | "reach";
+
 // ─── Per-Token Trading Parameters ────────────────────────────────────
 export interface TradingParams {
   mode: TradingMode;
@@ -84,6 +96,45 @@ export interface TradingParams {
   tradeSizeSigma: number;
   /** Per-tick probability of starting a 30–60 min quiet period. */
   quietPeriodProbability: number;
+
+  // ─── Price defense (delta_neutral only) ────────────────────────────
+  //
+  // An absolute price level the bot pushes toward, independent of where
+  // the market currently sits. This is what the weekly-anchor drift alone
+  // cannot do: the anchor re-bases to today's open every morning, so a
+  // sustained sell-off drags the target down with it. A target price is
+  // fixed until the operator moves it, so the bot keeps buying the dip
+  // for as long as the dip lasts.
+  //
+  // 0 disables the defense and restores pure anchor-drift behaviour.
+
+  /** Absolute price to defend. 0 disables the price defense. */
+  targetPrice: number;
+  /** Quote direction of targetPrice — either convention is accepted. */
+  targetPriceUnit: TargetPriceUnit;
+  /**
+   * Multiplier on log(target / price). 10 means a 1% gap moves P(buy) by
+   * roughly 0.1; a 10% gap saturates against the pBuy clamp.
+   */
+  targetPriceStrength: number;
+  /**
+   * "hold" keeps defending the level indefinitely. "reach" disengages the
+   * skew the first time the price touches or crosses the target, after
+   * which the token trades pure delta-neutral.
+   */
+  targetPriceMode: TargetPriceMode;
+  /** Band (%) around the target that counts as having reached it. */
+  targetPriceReachedTolerancePct: number;
+  /**
+   * Applying a target further than this (%) from the live price needs an
+   * explicit confirmation. Catches unit mix-ups and fat fingers before
+   * they turn into a one-sided buying spree. <= 0 disables the guard.
+   */
+  targetPriceMaxDeviationPct: number;
+  /** Lower clamp on P(buy) — keeps some counter-direction flow alive. */
+  pBuyMin: number;
+  /** Upper clamp on P(buy). */
+  pBuyMax: number;
 }
 
 // ─── Main Config ─────────────────────────────────────────────────────
@@ -145,6 +196,64 @@ const BSC_WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
 const PANCAKE_V2_ROUTER_DEFAULT = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
 const PANCAKE_V2_FACTORY_DEFAULT = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73";
 
+function parseTargetPriceUnit(v: string): TargetPriceUnit {
+  if (v !== "USD_PER_TOKEN" && v !== "TOKEN_PER_USD") {
+    throw new Error(
+      `Invalid TARGET_PRICE_UNIT '${v}'. Must be USD_PER_TOKEN or TOKEN_PER_USD`
+    );
+  }
+  return v;
+}
+
+function parseTargetPriceMode(v: string): TargetPriceMode {
+  if (v !== "hold" && v !== "reach") {
+    throw new Error(`Invalid TARGET_PRICE_MODE '${v}'. Must be hold or reach`);
+  }
+  return v;
+}
+
+/**
+ * Validate the price-defense knobs. Shared by loadConfig (env at boot) and
+ * the dashboard's runtime param updates, so a bad value is rejected the
+ * same way whichever door it comes through.
+ *
+ * Throws on the first problem found; returns silently when the params are
+ * usable. Fields absent from `p` are not checked — callers may pass a
+ * partial patch.
+ */
+export function validatePriceDefenseParams(p: Partial<TradingParams>): void {
+  if (p.targetPrice !== undefined) {
+    if (!Number.isFinite(p.targetPrice) || p.targetPrice < 0) {
+      throw new Error("targetPrice must be a number >= 0 (0 disables)");
+    }
+  }
+  if (p.targetPriceStrength !== undefined) {
+    if (!Number.isFinite(p.targetPriceStrength) || p.targetPriceStrength < 0) {
+      throw new Error("targetPriceStrength must be a number >= 0");
+    }
+  }
+  if (p.targetPriceReachedTolerancePct !== undefined) {
+    if (
+      !Number.isFinite(p.targetPriceReachedTolerancePct) ||
+      p.targetPriceReachedTolerancePct < 0
+    ) {
+      throw new Error("targetPriceReachedTolerancePct must be a number >= 0");
+    }
+  }
+  // pBuy bounds are validated as a pair whenever either side is present, so
+  // a patch that only moves one of them still cannot invert the range.
+  if (p.pBuyMin !== undefined || p.pBuyMax !== undefined) {
+    const lo = p.pBuyMin ?? 0;
+    const hi = p.pBuyMax ?? 1;
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+      throw new Error("pBuyMin/pBuyMax must be numbers");
+    }
+    if (lo < 0 || hi > 1 || lo >= hi) {
+      throw new Error("pBuyMin/pBuyMax must satisfy 0 <= pBuyMin < pBuyMax <= 1");
+    }
+  }
+}
+
 export function loadConfig(): AppConfig {
   const walletKeysRaw = requiredEnv("WALLET_PRIVATE_KEYS");
   const walletKeys = walletKeysRaw
@@ -180,7 +289,7 @@ export function loadConfig(): AppConfig {
   const anchorDataDir =
     optionalEnv("ANCHOR_DATA_DIR", path.join(process.cwd(), "data", "anchor"));
 
-  return {
+  const config: AppConfig = {
     rpcUrl: optionalEnv("BSC_RPC_URL", "https://bsc-dataseed1.binance.org"),
     chainId: parseInt(optionalEnv("CHAIN_ID", "56")),
     walletKeys,
@@ -224,6 +333,24 @@ export function loadConfig(): AppConfig {
       quietPeriodProbability: parseFloat(
         optionalEnv("QUIET_PERIOD_PROBABILITY", "0.005")
       ),
+      targetPrice: parseFloat(optionalEnv("TARGET_PRICE", "0")),
+      targetPriceUnit: parseTargetPriceUnit(
+        optionalEnv("TARGET_PRICE_UNIT", "USD_PER_TOKEN")
+      ),
+      targetPriceStrength: parseFloat(
+        optionalEnv("TARGET_PRICE_STRENGTH", "10")
+      ),
+      targetPriceMode: parseTargetPriceMode(
+        optionalEnv("TARGET_PRICE_MODE", "hold")
+      ),
+      targetPriceReachedTolerancePct: parseFloat(
+        optionalEnv("TARGET_PRICE_REACHED_TOLERANCE_PCT", "1")
+      ),
+      targetPriceMaxDeviationPct: parseFloat(
+        optionalEnv("TARGET_PRICE_MAX_DEVIATION_PCT", "10")
+      ),
+      pBuyMin: parseFloat(optionalEnv("BUY_PROB_MIN", "0.15")),
+      pBuyMax: parseFloat(optionalEnv("BUY_PROB_MAX", "0.85")),
     },
     defaultWalletSelector: optionalEnv("DEFAULT_TOKEN_WALLETS", ""),
     dashboardPort: parseInt(optionalEnv("PORT", "3000")),
@@ -235,6 +362,10 @@ export function loadConfig(): AppConfig {
     ),
     dryRun: optionalEnv("DRY_RUN", "false") === "true",
   };
+
+  validatePriceDefenseParams(config.defaultTradingParams);
+
+  return config;
 }
 
 /**
